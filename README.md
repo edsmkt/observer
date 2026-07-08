@@ -101,6 +101,7 @@ state-mutating batch script.
 ```bash
 git clone https://github.com/edsmkt/observer-kit
 cd observer-kit/skills/observer-kit
+python3 test_runguard.py          # verify the safety core — 11 checks, all pass
 python3 run_dashboard.py          # open http://localhost:8484, pick the sample run
 python3 example_worker.py --table alpha   # watch a run fill the table live
 python3 example_worker.py --table alpha   # a second copy REFUSES — the guard working
@@ -115,6 +116,7 @@ python3 example_worker.py --table alpha   # a second copy REFUSES — the guard 
 | `run_dashboard.py` | The localhost observer — **a standalone app; run ONE instance** pointed at any project's ledger dir (`python3 run_dashboard.py <dir>`), don't vendor it per-project |
 | `EXPLAIN.md` | Template for the plain-English + ASCII "statement of intent" |
 | `example_worker.py` | Runnable end-to-end example (parallel datasets + throttle) |
+| `test_runguard.py` | Acceptance tests for the safety core (lock exclusivity, stale-lock takeover, re-entrancy, scope isolation, ledger append/continuity, cross-process throttle). Run it after vendoring `runguard.py` to prove the guards hold |
 | `README.md` | The full pattern, event vocabulary, safety rules |
 | `BUILD-GUIDE.md` | Rebuild the whole stack from scratch, with acceptance tests |
 
