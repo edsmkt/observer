@@ -38,6 +38,7 @@ import atexit
 import fcntl
 import json
 import os
+import sys
 import time
 
 _STATE_DIR = os.environ.get('RUNGUARD_STATE_DIR') or os.path.join(
@@ -110,6 +111,15 @@ def ledger(scope: str, event: str, **fields) -> None:
     rec.update(fields)
     with open(_ledgers[scope], 'a') as f:
         f.write(json.dumps(rec, ensure_ascii=False, default=str) + '\n')
+    if event == 'run_started':
+        # Marker a harness hook can match to remind the agent to start this run's
+        # watcher (so operator dashboard notes reach THIS session). Cheap + universal:
+        # any run that logs run_started emits it, whether or not start_run() is used.
+        rid = f'runguard:{os.path.basename(_ledgers[scope])}'
+        sys.stderr.write(
+            f"OBSERVER_RUN_STARTED {rid}\n"
+            f"[observer] start this run's chat watcher to receive operator notes:\n"
+            f"           python3 watch_chat.py {rid} --state-dir {_STATE_DIR}\n")
 
 
 def ledger_path(scope: str) -> str | None:
@@ -122,6 +132,8 @@ def current_run_id(scope: str) -> str | None:
     With RUNGUARD_SESSION pinned this stays stable across re-runs, so notes persist."""
     p = _ledgers.get(scope)
     return f'runguard:{os.path.basename(p)}' if p else None
+
+
 
 
 def throttle(resource: str, per_second: float) -> None:

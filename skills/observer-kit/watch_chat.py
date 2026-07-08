@@ -9,19 +9,23 @@ session that launched that run is the only one that acts on them.
 Harness-agnostic: it just prints new user notes (as JSON lines) and exits — wire it
 into whatever your harness uses to wake an idle agent.
   - Claude Code: point the Monitor tool at `python3 watch_chat.py <run_id>`; each time
-    it prints + exits, the harness re-invokes you with the note. (It's already scoped,
-    so other sessions' runs never wake you.)
+    it prints + exits, the harness re-invokes you with the note. (Already scoped, so
+    other sessions' runs never wake you.)
   - Anything else: run it in a loop, or call runguard.read_chat(run_id) yourself.
+  - runguard.start_run(scope) spawns this with --follow, funnelling a run's notes into
+    <state>/<run>.inbox.jsonl the moment the run starts.
 
 The run_id is what runguard.current_run_id(scope) returns, e.g.
-'runguard:2025-06-15-enrich-companies.jsonl' — the same value the dashboard tags notes with.
+'runguard:2025-06-15-enrich.jsonl' — the same value the dashboard tags notes with.
+
+By default only notes that arrive AFTER the watcher starts are surfaced (pre-existing
+notes are marked seen); pass --include-existing to also emit ones already in the file.
+Dedup is by message content, not timestamp, so a note posted in the same second the
+watcher starts is not lost.
 
 Usage:
-  python3 watch_chat.py <run_id> [--state-dir DIR] [--since TS] [--poll SEC]
-                                 [--follow] [--timeout SEC]
-Defaults: state dir from $RUNGUARD_STATE_DIR (else ./.runguard); notes after start time;
-blocks until the first new note for this run, prints it, exits 0 (re-invoke loop).
---follow keeps streaming; --timeout N exits 0 after N seconds even with nothing new.
+  python3 watch_chat.py <run_id> [--state-dir DIR] [--poll SEC]
+                                 [--follow] [--timeout SEC] [--include-existing]
 """
 import os
 import sys
@@ -46,34 +50,46 @@ def _load(path):
     return out
 
 
-def new_notes(chat_path, run_id, after_ts):
-    """Operator (author='user') notes for THIS run, left after `after_ts`."""
-    return [m for m in _load(chat_path)
-            if m.get('author') == 'user'
-            and m.get('run') == run_id
-            and (m.get('ts') or '') > after_ts]
+def _sig(m):
+    """Stable identity of a note — timestamp-independent, so same-second notes aren't lost."""
+    return json.dumps([m.get('ts'), m.get('run'), m.get('anchor'), m.get('text')],
+                      ensure_ascii=False, sort_keys=True)
+
+
+def _matches(m, run_id):
+    return m.get('author') == 'user' and m.get('run') == run_id
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('run_id', help="only notes for THIS run wake the watcher (multi-session safe)")
     ap.add_argument('--state-dir', default=os.environ.get('RUNGUARD_STATE_DIR') or '.runguard')
-    ap.add_argument('--since', default=None, help="ISO ts; default = now (only notes left after start)")
     ap.add_argument('--poll', type=float, default=2.0)
     ap.add_argument('--follow', action='store_true', help="keep streaming instead of exiting on the first batch")
     ap.add_argument('--timeout', type=float, default=0, help="0 = wait forever")
+    ap.add_argument('--include-existing', action='store_true',
+                    help="also emit notes already in the file at startup (default: only new)")
     a = ap.parse_args()
 
     chat_path = os.path.join(a.state_dir, 'chat.jsonl')
-    since = a.since or time.strftime('%Y-%m-%dT%H:%M:%S')
+    seen = set()
+    if not a.include_existing:                      # ignore notes left before we started
+        for m in _load(chat_path):
+            if _matches(m, a.run_id):
+                seen.add(_sig(m))
     deadline = (time.time() + a.timeout) if a.timeout else None
 
     while True:
-        notes = new_notes(chat_path, a.run_id, since)
-        if notes:
-            for m in notes:
+        fresh = []
+        for m in _load(chat_path):
+            if _matches(m, a.run_id):
+                s = _sig(m)
+                if s not in seen:
+                    seen.add(s)
+                    fresh.append(m)
+        if fresh:
+            for m in fresh:
                 print(json.dumps(m, ensure_ascii=False))
-                since = m.get('ts') or since
             sys.stdout.flush()
             if not a.follow:
                 return 0

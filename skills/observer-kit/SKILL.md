@@ -97,6 +97,31 @@ any project; you don't vendor it per-project.
 That's the whole core. The script now can't collide, has an audit trail, and
 streams live — without changing what it actually does.
 
+## Setup once per project (Claude Code): the run-started hook
+
+So you don't have to *remember* to start the watcher, add a hook that reminds you
+whenever a run begins. `runguard` prints an `OBSERVER_RUN_STARTED <run_id>` marker on
+every `run_started`; the bundled `observer_hook.py` catches it and tells you to start
+that run's watcher. **On setup, add this to the project's `.claude/settings.json`**
+(merge with existing hooks — don't replace):
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      { "matcher": "Bash",
+        "hooks": [ { "type": "command",
+          "command": "python3 ~/.claude/skills/observer-kit/observer_hook.py" } ] } ]
+  }
+}
+```
+
+(Use the vendored path if the kit isn't user-installed, e.g. `python3 tools/observer-kit/observer_hook.py`.)
+Then, when a run starts, the hook nudges you to run `watch_chat.py <run_id>` — the
+run-scoped watcher, so notes reach the right session. It's a **backstop**: reliable for
+foreground launches; a background launch's marker may not be in the immediate tool
+output, so still start the watcher yourself when you launch in the background.
+
 ## Optional add-ons (reach for the ones that fit)
 
 - **Throttle a shared API** — `throttle('<provider>', <per_second>)` before each
