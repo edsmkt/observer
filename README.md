@@ -114,6 +114,7 @@ python3 example_worker.py --table alpha   # a second copy REFUSES — the guard 
 | `SKILL.md` | Agent entry point — when to use it and how to wire it in |
 | `runguard.py` | Locks + append-only ledger + cross-process throttle — **a library; vendor it into your project** (your script imports it) |
 | `run_dashboard.py` | The localhost observer — **a standalone app; run ONE instance** pointed at any project's ledger dir (`python3 run_dashboard.py <dir>`), don't vendor it per-project |
+| `watch_chat.py` | Run-scoped chat watcher — surfaces the operator's dashboard notes for **one** run so the right agent session gets them (multi-session safe). Wire into your harness's wake-up (Claude Code: the Monitor tool) |
 | `EXPLAIN.md` | Template for the plain-English + ASCII "statement of intent" |
 | `example_worker.py` | Runnable end-to-end example (parallel datasets + throttle) |
 | `test_runguard.py` | Acceptance tests for the safety core (lock exclusivity, stale-lock takeover, re-entrancy, scope isolation, ledger append/continuity, cross-process throttle). Run it after vendoring `runguard.py` to prove the guards hold |

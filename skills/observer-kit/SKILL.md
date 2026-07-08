@@ -112,6 +112,18 @@ streams live — without changing what it actually does.
   resolve notes with `post_chat(run_id, anchor, text, resolved=True)` (badge → ✓).
   A running process can't change its own code, so all real iteration happens on
   the sample; the full run polls `read_chat()` between rounds only for a STOP.
+- **Hear the operator while you're idle — start a RUN-SCOPED watcher (key for many
+  sessions).** After launching a run, set up a watcher so the operator's dashboard
+  notes reach you. Use the bundled `watch_chat.py <run_id>`: it prints new notes for
+  that one run and exits, so your harness re-invokes you with them. Get the id from
+  `runguard.current_run_id(scope)` (e.g. `runguard:2025-06-15-enrich.jsonl`).
+  - In **Claude Code**, point the Monitor tool at `python3 watch_chat.py <run_id>`.
+  - Otherwise, loop it (or poll `read_chat(run_id)` yourself).
+
+  **Scope it to YOUR run_id.** All notes land in one shared `chat.jsonl`; with several
+  sessions open, an *unscoped* watcher wakes every session on every note. A run-scoped
+  watcher routes each note to only the session that launched that run — session A never
+  wakes for a note left on session B's run.
 - **Continuous vs separate lanes** — same scope name = one continuous run
   (before/after and chat persist across re-runs). Set `RUNGUARD_SESSION=<slug>`
   to open a separate lane (a dated weekly run, or a clean A/B).
