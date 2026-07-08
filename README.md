@@ -17,6 +17,21 @@ no dependencies:
   that renders a plain-English + ASCII `EXPLAIN.md` so a non-technical operator
   can verify what a run is doing and stop it if it's wrong.
 
+## What it looks like
+
+**Per company** — one row per item; pills fill in live as results land:
+
+![Per company view](assets/per-company.png)
+
+**Timeline** — every step in plain English, newest work as it happens:
+
+![Timeline view](assets/timeline.png)
+
+**How it works** — a plain-English + ASCII "statement of intent" (from
+`EXPLAIN.md`) the operator reads to confirm what a run will do *before* it spends:
+
+![How it works view](assets/how-it-works.png)
+
 ## Install
 
 Into your user scope (available in every project you open):
