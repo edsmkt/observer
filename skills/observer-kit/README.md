@@ -54,7 +54,8 @@ treatment (plain-English lines + table columns + counters):
 | `run_started`        | `companies`/`todo`, `worst_case_credits`        | run progress card |
 | `run_finished`       | any stats                                       | run progress card |
 | `bc_submitted`*      | `round`, `leads`, `contacts:[{name,company,tier}]` | marks rows "searching…" |
-| `bc_credits`*        | `credits_consumed`, `credits_left`              | credit counters |
+| `bc_credits`*        | `credits_consumed`, `credits_left`              | credit counters (single provider) |
+| `credits`            | `provider`, `used`, `left`                      | one credit chip **per provider** — emit one per provider (blitz, ai-ark, moltsets…) |
 | `phone_found`        | `company`, `name`, `phone`, `tier`              | green pill in Phone column |
 | `phone_not_found`    | `company`, `name`                               | amber "not found" |
 | `email_found`        | `company`, `name`, `email`, `source`            | green pill in Email column |

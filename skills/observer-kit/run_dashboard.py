@@ -289,16 +289,21 @@ function openChat(anchor,label,el){
   pop.style.left=Math.max(8,Math.min(r.left,window.innerWidth-336))+'px';
   pop.style.top=Math.max(8,Math.min(r.bottom+6,window.innerHeight-300))+'px';
   document.getElementById('chatpopHead').textContent='💬 '+label;
-  renderThread();
+  renderThread(true);
   const ti=document.getElementById('chatinput'); ti.value=''; ti.focus();
 }
 function closeChat(){chatOpenAnchor=null;document.getElementById('chatpop').style.display='none';}
-function renderThread(){
+function renderThread(forceBottom){
+  const t=document.getElementById('chatthread');
+  // only snap to the newest if you were already at the bottom; otherwise keep
+  // your scroll position so you can read earlier messages while polls come in.
+  const atBottom=t.scrollHeight-t.scrollTop-t.clientHeight<40;
+  const prev=t.scrollTop;
   const msgs=chatByAnchor[chatOpenAnchor]||[];
-  document.getElementById('chatthread').innerHTML=msgs.length
+  t.innerHTML=msgs.length
     ?msgs.map(m=>`<div class="msg ${m.author==='agent'?'agent':'user'}"><b>${m.author==='agent'?'agent':'you'}</b> <small style="color:var(--dim)">${(m.ts||'').slice(11,16)}</small>${m.resolved?' <small style="color:var(--ok)">✓ resolved</small>':''}<div>${esc(m.text)}</div></div>`).join('')
     :'<div style="color:var(--dim);font-size:12.5px">No notes here yet. Tell the agent what to change — it watches for your messages and can reply.</div>';
-  const t=document.getElementById('chatthread'); t.scrollTop=t.scrollHeight;
+  t.scrollTop=(forceBottom||atBottom)?t.scrollHeight:prev;
 }
 async function sendChat(){
   const ti=document.getElementById('chatinput'), text=ti.value.trim();
@@ -342,6 +347,7 @@ function humanize(e){
     case 'run_started': return {icon:'▶️',cls:'info',text:`Run started — ${e.companies??e.todo??'?'} companies`+(e.worst_case_credits?`, spend ceiling ${e.worst_case_credits} credits`:'')};
     case 'run_finished': return {icon:'🏁',cls:'info',text:`Run finished — `+Object.entries(e).filter(([k])=>!['ts','event','_file'].includes(k)).map(([k,v])=>`${k.replaceAll('_',' ')}: ${typeof v==='object'?JSON.stringify(v):v}`).join(', ')};
     case 'bc_submitted': return {icon:'📤',cls:'info',text:`Round ${e.round??'?'}: requested ${e.leads} lookup${e.leads>1?'s':''} from the provider`,detail:(e.contacts||[]).map(c=>`${c.name} (${c.company})`).join(', ')};
+    case 'credits': return {icon:'💳',cls:'warn',text:`${e.provider||'Provider'} credits — used ${e.used??e.credits_consumed??'?'}${(e.left??e.credits_left)!==undefined?`, ${e.left??e.credits_left} left`:''}`};
     case 'bc_credits': return {icon:'💳',cls:'warn',text:`Provider credits — used ${e.credits_consumed??'?'}, remaining ${e.credits_left??'?'}`};
     case 'bc_poll_timeout': return {icon:'⏱',cls:'err',text:`The provider took too long to answer (request ${e.request_id})`};
     case 'phone_found': return {icon:'📞',cls:'ok',text:`Found phone for ${who}${co}: ${esc(e.phone)}`,company:e.company,record:{name:e.name,phone:e.phone}};
@@ -504,24 +510,34 @@ function render(){
 
 function renderStats(){
   const s={phones:0,emails:0,misses:0,writes:0,assoc:0,errors:0};
-  let credits, creditsLeft;
+  const prov={};  // provider -> {used, left}: per-provider credit counters
   for(const e of all){
     const a=e.action||e.event||'';
     if(a==='phone_found')s.phones++;
     if(a==='email_found')s.emails++;
     if(/not_found/.test(a))s.misses++;
-    if(e.credits_consumed!==undefined)credits=e.credits_consumed;
-    if(e.credits_left!==undefined)creditsLeft=e.credits_left;
+    // credits: a `credits` event carries a `provider`; legacy `bc_credits` is one provider
+    if(a==='credits'||a==='bc_credits'){
+      const p=e.provider||'provider';
+      const c=prov[p]=prov[p]||{};
+      const used=e.used??e.credits_consumed, left=e.left??e.credits_left;
+      if(used!==undefined)c.used=used;
+      if(left!==undefined)c.left=left;
+    }
     if(e.endpoint&&/POST|PATCH|PUT|DELETE/.test(e.endpoint)&&!/search/i.test(e.endpoint)&&e.status_code<300)s.writes++;
     if(/associat/i.test(e.endpoint||'')&&e.status_code<300)s.assoc++;
     if(/error|fail|timeout/i.test(a)||(e.status_code>=400))s.errors++;
   }
-  const items={'phones found':s.phones,'emails found':s.emails,'no result':s.misses,
-    'CRM writes':s.writes,'associations':s.assoc,'credits used':credits,'credits left':creditsLeft,'errors':s.errors};
-  document.getElementById('stats').innerHTML=Object.entries(items)
-    .filter(([,v])=>v!==undefined&&v!==0||['phones found','emails found'].includes(arguments[0]))
+  const chips=[['phones found',s.phones],['emails found',s.emails]];
+  if(s.misses)chips.push(['no result',s.misses]);
+  if(s.writes)chips.push(['CRM writes',s.writes]);
+  if(s.assoc)chips.push(['associations',s.assoc]);
+  for(const [p,c] of Object.entries(prov))          // one chip per provider
+    chips.push([`${p} credits${c.left!==undefined?` · ${c.left} left`:''}`, c.used??0]);
+  if(s.errors)chips.push(['errors',s.errors]);
+  document.getElementById('stats').innerHTML=chips
     .filter(([,v])=>v!==undefined)
-    .map(([k,v])=>`<span class=chip><b class="${k==='errors'&&v?'err':'ok'}">${v}</b><small>${k}</small></span>`).join('');
+    .map(([k,v])=>`<span class=chip><b class="${k==='errors'&&v?'err':'ok'}">${v}</b><small>${esc(k)}</small></span>`).join('');
 }
 
 async function poll(){
