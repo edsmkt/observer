@@ -112,22 +112,25 @@ that run's watcher. **On setup, add this to the project's `.claude/settings.json
       { "matcher": "Bash",
         "hooks": [ { "type": "command",
           "if": "Bash(python3 *)",
-          "command": "python3 ~/.claude/skills/observer-kit/observer_hook.py" } ] } ]
+          "command": "python3 <path-to>/observer_hook.py 2>/dev/null || true" } ] } ]
   }
 }
 ```
 
-Keep it **specific so it never touches unrelated work**:
-- **Install it project-local** (`.claude/settings.local.json` in the repo that runs
-  observer-kit), NOT global — a global hook would run on every Bash in every project.
-- The **`if: "Bash(python3 *)"`** guard means it only even executes on `python3 …`
-  launches — `git`, `ls`, etc. never trigger it. (Adjust the pattern if your runs launch
-  another way, e.g. `Bash(./run.sh *)`.)
-- Even when it runs, it is **silent unless** the output contains the very specific
-  `OBSERVER_RUN_STARTED runguard:<file>` marker — so it never injects into unrelated
-  commands. Silent hooks are invisible in the UI.
+Keep it **specific so it never touches unrelated work** — three independent guards:
+- **Scope to the project, never global.** Pick one:
+  - `.claude/settings.local.json` — personal & gitignored (just you); use
+    `~/.claude/skills/observer-kit/observer_hook.py` as the path.
+  - `.claude/settings.json` — committed, so **everyone who works in this repo** gets it.
+    For this, point at a **repo-vendored** path (e.g. `tools/observer-kit/observer_hook.py`),
+    NOT `~/.claude/...` which won't exist on a teammate's machine, and keep the
+    `2>/dev/null || true` so a teammate who doesn't use observer-kit sees nothing.
 
-(Use the vendored path if the kit isn't user-installed, e.g. `python3 tools/observer-kit/observer_hook.py`.)
+    A global `~/.claude/settings.json` hook would run on every Bash in EVERY project — don't.
+- **`if: "Bash(python3 *)"`** — only executes on `python3 …` launches; `git`, `ls`, etc.
+  never trigger it. (Adjust for other launch styles, e.g. `Bash(./run.sh *)`.)
+- **Marker-gated** — even when it runs it's silent unless the output contains the specific
+  `OBSERVER_RUN_STARTED runguard:<file>` marker. Silent hooks are invisible in the UI.
 When a run starts, the hook nudges you to run `watch_chat.py <run_id>` — the run-scoped
 watcher, so notes reach the right session. It's a **backstop**: reliable for foreground
 launches; a background launch's marker may not be in the immediate tool output, so still
