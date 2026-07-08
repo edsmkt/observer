@@ -1,0 +1,543 @@
+#!/usr/bin/env python3
+"""Local run observer — a SAMPLE live dashboard for any enrichment / batch run.
+
+Zero-intrusion: reads the append-only JSONL ledgers your run scripts write (see
+runguard.py) and renders them as a live per-record table + plain-English
+timeline. Read-only — it can observe a run but never affect one.
+
+This file is a starting point, not a fixed product. The table columns and the
+humanize() event map are tuned for a contact-enrichment example (phone / email /
+CRM id); keep them, or remap them to whatever your workflow logs — the
+guard / ledger / observer machinery works with any events.
+
+ADAPT HERE: point SOURCES at your project's ledger directories.
+  - 'runguard' style: a flat dir of <timestamp>-<scope>.jsonl ledger files
+    (what runguard.ledger() writes). Locks (*.lock) in the same dirs show in
+    the "who is writing right now" panel.
+  - 'push' style (optional): a dir of per-run SUBDIRECTORIES each containing
+    events.jsonl (+ api-calls.jsonl) — delete the entry if you don't have this.
+
+Usage:  python3 run_dashboard.py   (then open http://localhost:8484)
+Stdlib only. Localhost only.
+"""
+import json
+import os
+import re
+import time
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+SOURCES = {
+    'push': os.path.join(BASE, 'runs'),                 # per-run subdirs (optional)
+    'enrich': os.path.join(BASE, 'enrich_runs'),        # flat jsonl dir (optional)
+    'runguard': os.environ.get('RUNGUARD_STATE_DIR')    # runguard ledgers + locks
+                or os.path.join(BASE, '.runguard'),
+}
+PORT = 8484
+ACTIVE_S = 120   # a file touched in the last 2 min counts as live
+
+
+def _first_event(path):
+    try:
+        with open(path, 'rb') as f:
+            line = f.readline(8192).decode('utf-8', 'replace').strip()
+        return json.loads(line) if line else {}
+    except Exception:
+        return {}
+
+
+def _describe(first):
+    """Plain-language one-liner for a run, from its first ledger event.
+    Scripts can set it explicitly: ledger(scope, 'run_started', description='...')."""
+    if first.get('description'):
+        return str(first['description'])
+    bits = []
+    n = first.get('companies') or first.get('todo') or (first.get('details') or {}).get('total')
+    if n:
+        bits.append(f'{n} companies')
+    if first.get('worst_case_credits'):
+        bits.append(f'max {first["worst_case_credits"]} credits')
+    if first.get('table'):
+        bits.append(f'table {first["table"]}')
+    if first.get('input'):
+        bits.append(os.path.basename(str(first['input'])))
+    if first.get('verb'):
+        bits.append(f'{first["verb"]} run')
+    return ' · '.join(bits)
+
+
+def _nice_name(raw, kind):
+    """'2025-03-10T19-15-59Z-enrich' → ('enrich', 'Mar 10, 19:15');
+    '2025-01-15-113016-my-run.jsonl' → ('my-run', 'Jan 15, 11:30')."""
+    raw = re.sub(r'\.jsonl$', '', raw)
+    m = re.match(r'(\d{4})-(\d{2})-(\d{2})[T-](\d{2})[-:]?(\d{2})[-:]?\d{2}Z?-(.+)', raw)
+    if not m:
+        return raw, ''
+    y, mo, d, h, mi, scope = m.groups()
+    months = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+    return scope.replace('-', ' '), f'{months[int(mo)]} {int(d)}, {h}:{mi}'
+
+
+def list_runs():
+    runs = []
+    now = time.time()
+    push_dir = SOURCES['push']
+    if os.path.isdir(push_dir):
+        for d in os.listdir(push_dir):
+            ev = os.path.join(push_dir, d, 'events.jsonl')
+            if os.path.exists(ev):
+                mtime = os.path.getmtime(ev)
+                name, when = _nice_name(d, 'push')
+                runs.append({'id': f'push:{d}', 'label': d, 'name': name, 'when': when,
+                             'desc': _describe(_first_event(ev)), 'kind': 'push',
+                             'path': os.path.abspath(os.path.join(push_dir, d)),
+                             'mtime': mtime, 'live': now - mtime < ACTIVE_S})
+    for kind in ('enrich', 'runguard'):
+        d = SOURCES[kind]
+        if os.path.isdir(d):
+            for f in os.listdir(d):
+                if f.endswith('.jsonl'):
+                    p = os.path.join(d, f)
+                    mtime = os.path.getmtime(p)
+                    name, when = _nice_name(f, kind)
+                    runs.append({'id': f'{kind}:{f}', 'label': f, 'name': name, 'when': when,
+                                 'desc': _describe(_first_event(p)), 'kind': kind,
+                                 'path': os.path.abspath(p),
+                                 'mtime': mtime, 'live': now - mtime < ACTIVE_S})
+    runs.sort(key=lambda r: -r['mtime'])
+    return runs[:40]
+
+
+def locks():
+    out = []
+    for d in set(SOURCES.values()):
+        if not d or not os.path.isdir(d):
+            continue
+        for f in os.listdir(d):
+            if f.endswith('.lock'):
+                try:
+                    lock = json.load(open(os.path.join(d, f)))
+                    pid = int(lock.get('pid', -1))
+                    try:
+                        os.kill(pid, 0)
+                        alive = True
+                    except Exception:
+                        alive = False
+                    out.append({'scope': lock.get('scope') or f, 'pid': pid,
+                                'started': lock.get('started'), 'alive': alive})
+                except Exception:
+                    pass
+    return out
+
+
+def _files_for(run_id):
+    kind, _, name = run_id.partition(':')
+    if not re.fullmatch(r'[\w.\-:TZ]+', name):
+        return []
+    if kind == 'push':
+        d = os.path.join(SOURCES['push'], name)
+        return [p for p in (os.path.join(d, 'events.jsonl'), os.path.join(d, 'api-calls.jsonl'))
+                if os.path.exists(p)]
+    p = os.path.join(SOURCES.get(kind, ''), name)
+    return [p] if os.path.exists(p) else []
+
+
+def read_events(run_id, offsets):
+    """Incremental tail: offsets = {path: byte_offset} from the client."""
+    events, new_offsets = [], {}
+    for path in _files_for(run_id):
+        off = int(offsets.get(path, 0))
+        size = os.path.getsize(path)
+        if size < off:
+            off = 0  # rotated/truncated
+        with open(path, 'rb') as f:
+            f.seek(off)
+            chunk = f.read(512 * 1024)
+        new_offsets[path] = off + len(chunk)
+        for line in chunk.decode('utf-8', 'replace').splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+                rec['_file'] = os.path.basename(path)
+                events.append(rec)
+            except json.JSONDecodeError:
+                pass
+    events.sort(key=lambda e: e.get('ts') or '')
+    return events, new_offsets
+
+
+PAGE = """<!doctype html><meta charset="utf-8"><title>Run observer</title>
+<style>
+:root{--bg:#0f1317;--panel:#181e25;--card:#1e262f;--txt:#e6ebf0;--dim:#8b96a3;--ok:#57c98a;--warn:#e5b95a;--err:#e5756a;--info:#6fa8e0;--line:#28313c}
+*{box-sizing:border-box}
+body{margin:0;font:14px/1.6 -apple-system,'Segoe UI',sans-serif;background:var(--bg);color:var(--txt);display:flex;height:100vh}
+#side{width:320px;min-width:320px;overflow-y:auto;background:var(--panel);padding:14px;border-right:1px solid #000}
+#sideHead{display:flex;justify-content:flex-end;margin-bottom:2px}
+#sideToggle{background:var(--card);border:none;color:var(--dim);border-radius:7px;padding:4px 10px;cursor:pointer;font-size:13px}
+#sideToggle:hover{color:var(--txt)}
+body.noside #side{width:42px;min-width:42px;padding:10px 5px;overflow:hidden}
+body.noside #side > :not(#sideHead){display:none}
+body.noside #sideHead{justify-content:center}
+#main{flex:1;display:flex;flex-direction:column;overflow:hidden}
+#topbar{padding:12px 20px;background:var(--panel);border-bottom:1px solid #000}
+#stats{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px}
+.chip{background:var(--card);border-radius:8px;padding:6px 14px;text-align:center}
+.chip b{font-size:19px;display:block}
+#content{flex:1;overflow-y:auto;padding:14px 20px}
+h3{margin:10px 0 8px;font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.08em}
+.run{padding:7px 10px;border-radius:7px;cursor:pointer;margin-bottom:4px;font-size:12.5px}
+.run:hover{background:#242e39}.run.sel{background:#2c3948}
+.run small{color:var(--dim);display:block}
+.live{color:var(--ok)}.dead{color:var(--dim)}
+.line{padding:5px 0;border-bottom:1px solid var(--line);display:flex;gap:10px;align-items:baseline}
+.line .when{color:var(--dim);font-size:11.5px;min-width:56px;font-family:ui-monospace,monospace}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.err{color:var(--err)}.info{color:var(--info)}
+.card{background:var(--card);border-radius:10px;padding:12px 16px;margin-bottom:10px}
+.card h4{margin:0 0 6px;font-size:14.5px}
+.card .row{padding:3px 0;color:var(--txt)}
+.card .row small{color:var(--dim)}
+table{width:100%;border-collapse:collapse;background:var(--card);border-radius:10px;overflow:hidden}
+th{position:sticky;top:0;background:#242e3a;text-align:left;padding:9px 12px;font-size:11.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em}
+td{padding:8px 12px;border-top:1px solid var(--line);vertical-align:top}
+tr:hover td{background:#232c36}
+.pill{display:inline-block;padding:1px 9px;border-radius:99px;font-size:12px}
+.pill.ok{background:#1d3a2b;color:var(--ok)}.pill.warn{background:#3a331d;color:var(--warn)}
+.pill.err{background:#3a221d;color:var(--err)}.pill.dim{background:#242e39;color:var(--dim)}
+.tabs{display:flex;gap:8px}
+.tab{padding:5px 14px;border-radius:7px;background:var(--card);cursor:pointer;font-size:13px}
+.tab.sel{background:#314052}
+label{color:var(--dim);font-size:12.5px;margin-left:auto;align-self:center;cursor:pointer}
+input[type=text]{width:100%;background:#0d1114;color:var(--txt);border:1px solid var(--line);border-radius:7px;padding:6px 10px;margin-bottom:8px;font-size:13px}
+.lock{padding:6px 10px;border-radius:7px;margin-bottom:4px;background:var(--card);font-size:12.5px}
+.empty{color:var(--dim);padding:30px;text-align:center}
+.explain{max-width:820px;line-height:1.65}
+.explain h2{font-size:18px;margin:16px 0 6px}.explain h3{font-size:15px;margin:12px 0 4px}
+.explain p{margin:8px 0}.explain ul{margin:6px 0 6px 18px}.explain li{margin:3px 0}
+.explain code{background:#0d1114;padding:1px 5px;border-radius:4px;font-size:12.5px}
+pre.diagram{background:#0d1114;border:1px solid var(--line);border-radius:8px;padding:12px;overflow-x:auto;font:12.5px/1.45 ui-monospace,Menlo,monospace;color:var(--txt);white-space:pre}
+</style>
+<div id=side>
+  <div id=sideHead><button id=sideToggle onclick="toggleSide()" title="Hide/show the run list">◀</button></div>
+  <h3>Who is writing right now</h3><div id=locks class=empty>nothing running</div>
+  <h3>Runs (newest first)</h3><input type=text id=q placeholder="filter…"><div id=runs></div>
+</div>
+<div id=main>
+  <div id=topbar>
+    <div class=tabs>
+      <div class="tab sel" id=tabRecords onclick="view='records';render()">Per company</div>
+      <div class=tab id=tabFeed onclick="view='feed';render()">Timeline</div>
+      <div class=tab id=tabInfo onclick="view='info';render()">Run info</div>
+      <div class=tab id=tabExplain onclick="view='explain';render()">How it works</div>
+      <label title="Also show every raw HTTP request the run made (reads, polling). Failures always show, even unchecked."><input type=checkbox id=tech onchange="render()"> show raw API calls <span id=techCount style="color:var(--dim)"></span></label>
+      <span style="color:var(--dim);font-size:10.5px;align-self:center">v4</span>
+    </div>
+    <div id=stats></div>
+  </div>
+  <div id=content><div class=empty>Pick a run on the left. ● = running now.</div></div>
+</div>
+<script>
+let sel=null, offsets={}, all=[], view='records';
+const content=document.getElementById('content');
+let autoscroll=true;
+content.addEventListener('scroll',()=>{autoscroll=content.scrollTop+content.clientHeight>content.scrollHeight-60});
+
+function esc(s){return String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+
+// Turn a raw event into {icon, text, cls, company, detail} — plain English.
+function humanize(e){
+  const ev=e.action||e.event||'';
+  const who=e.name?`<b>${esc(e.name)}</b>`:'';
+  const co=e.company?` at ${esc(e.company)}`:'';
+  switch(ev){
+    case 'run_started': return {icon:'▶️',cls:'info',text:`Run started — ${e.companies??e.todo??'?'} companies`+(e.worst_case_credits?`, spend ceiling ${e.worst_case_credits} credits`:'')};
+    case 'run_finished': return {icon:'🏁',cls:'info',text:`Run finished — `+Object.entries(e).filter(([k])=>!['ts','event','_file'].includes(k)).map(([k,v])=>`${k.replaceAll('_',' ')}: ${typeof v==='object'?JSON.stringify(v):v}`).join(', ')};
+    case 'bc_submitted': return {icon:'📤',cls:'info',text:`Round ${e.round??'?'}: requested ${e.leads} lookup${e.leads>1?'s':''} from the provider`,detail:(e.contacts||[]).map(c=>`${c.name} (${c.company})`).join(', ')};
+    case 'bc_credits': return {icon:'💳',cls:'warn',text:`Provider credits — used ${e.credits_consumed??'?'}, remaining ${e.credits_left??'?'}`};
+    case 'bc_poll_timeout': return {icon:'⏱',cls:'err',text:`The provider took too long to answer (request ${e.request_id})`};
+    case 'phone_found': return {icon:'📞',cls:'ok',text:`Found phone for ${who}${co}: ${esc(e.phone)}`,company:e.company,record:{name:e.name,phone:e.phone}};
+    case 'phone_not_found': return {icon:'▫️',cls:'warn',text:`No phone found for ${who}${co}`,company:e.company,record:{name:e.name,phone:false}};
+    case 'email_found': return {icon:'✉️',cls:'ok',text:`Found email for ${who}${co}: ${esc(e.email)} <small>(via ${esc(e.source)})</small>`,company:e.company,record:{name:e.name,email:e.email,source:e.source}};
+    case 'email_not_found': return {icon:'▫️',cls:'warn',text:`No email found for ${who}${co}`,company:e.company,record:{name:e.name,email:false}};
+  }
+  // push library events.jsonl: {verb, phase, action, details}
+  if(e.phase!==undefined&&e.action!==undefined){
+    const d=e.details||{};
+    const bits=Object.entries(d).map(([k,v])=>`${k.replaceAll('_',' ')}: ${typeof v==='object'?JSON.stringify(v):v}`).join(', ');
+    const co2=d.company_name||d.domain||d.company;
+    return {icon:'•',cls:e.level==='error'?'err':'info',
+      text:`${esc(e.verb??'')} — ${esc(e.phase)} ${esc(String(e.action).replaceAll('_',' '))}`+(bits?` <small>(${esc(bits)})</small>`:''),
+      company:co2};
+  }
+  // api-calls.jsonl: {provider, endpoint, status_code}
+  if(e.endpoint!==undefined){
+    const bad=e.status_code>=400;
+    const mut=/POST|PATCH|PUT|DELETE/.test(e.endpoint)&&!/search/i.test(e.endpoint);
+    let text;
+    if(/associat/i.test(e.endpoint)) text=`CRM: linked two records (${esc(e.endpoint)})`;
+    else if(/POST \\/companies|POST \\/contacts/.test(e.endpoint)) text=`CRM: created a record (${esc(e.endpoint)})`;
+    else if(/PATCH/.test(e.endpoint)) text=`${esc(e.provider)}: updated a record (${esc(e.endpoint)})`;
+    else text=`${esc(e.provider)}: ${esc(e.endpoint)}`;
+    text+= bad?` — <b class=err>FAILED (${e.status_code})</b>`:'';
+    return {icon:mut?'✏️':'·',cls:bad?'err':(mut?'info':'dim'),text,technical:!mut&&!bad};
+  }
+  return {icon:'·',cls:'dim',text:esc(JSON.stringify(e)),technical:true};
+}
+
+let selMeta=null;
+
+// Minimal markdown -> HTML for the "How it works" tab. Fenced ``` blocks become
+// <pre> (keeps ASCII diagrams monospaced); #/##/### headings, - bullets, **bold**,
+// `code`, and blank-line paragraphs. Not a full engine — just enough for a
+// plain-English + ASCII explainer a non-developer can read.
+function mdToHtml(md){
+  const inline=s=>esc(s).replace(/\\*\\*(.+?)\\*\\*/g,'<b>$1</b>').replace(/`(.+?)`/g,'<code>$1</code>');
+  const parts=String(md).split(/```/);
+  let out='';
+  parts.forEach((chunk,i)=>{
+    if(i%2===1){ out+=`<pre class=diagram>${esc(chunk.replace(/^\\n/,'').replace(/\\n$/,''))}</pre>`; return; }
+    chunk.split(/\\n{2,}/).forEach(block=>{
+      const t=block.replace(/^\\n+|\\n+$/g,''); if(!t)return;
+      const h=t.match(/^(#{1,3})\\s+(.*)$/);
+      if(h){ out+=`<h${h[1].length+1}>${inline(h[2])}</h${h[1].length+1}>`; return; }
+      if(/^\\s*[-*]\\s+/.test(t)){
+        out+='<ul>'+t.split(/\\n/).filter(l=>/^\\s*[-*]\\s+/.test(l)).map(l=>`<li>${inline(l.replace(/^\\s*[-*]\\s+/,''))}</li>`).join('')+'</ul>';
+        return;
+      }
+      out+=`<p>${inline(t).replace(/\\n/g,'<br>')}</p>`;
+    });
+  });
+  return out;
+}
+async function loadExplain(){
+  // Always re-fetch. This is a live statement of intent the operator uses to
+  // verify the agent — a cached/stale version would defeat the whole point.
+  try{ const r=await (await fetch('/api/explain')).json(); return r.found?r.markdown:''; }
+  catch(e){ return ''; }
+}
+
+function render(){
+  for(const [v,id] of Object.entries({records:'tabRecords',feed:'tabFeed',info:'tabInfo',explain:'tabExplain'}))
+    document.getElementById(id).classList.toggle('sel',view===v);
+  const tech=document.getElementById('tech').checked;
+  const mapped=all.map(e=>({e,h:humanize(e)}));
+  const nTech=mapped.filter(x=>x.h.technical).length;
+  document.getElementById('techCount').textContent=
+    !sel?'(pick a run first)'
+    :nTech===0?'(none in this run)'
+    :tech?`(showing ${nTech})`
+    :`(${nTech} hidden)`;
+  renderStats();
+
+  // How it works — a static, non-technical explainer of the whole pipeline.
+  if(view==='explain'){
+    loadExplain().then(md=>{
+      content.innerHTML = md
+        ? `<div class="card explain">${mdToHtml(md)}</div>`
+        : '<div class=empty>No explainer yet.<br><br>The agent should write an <b>EXPLAIN.md</b> here — a plain-English + ASCII statement of what this run WILL do — <b>before</b> it spends or writes anything, so you can confirm it is doing the right thing and stop it if not.<br>The observer-kit skill generates one for your pipeline.</div>';
+    });
+    return;
+  }
+
+  if(!sel){content.innerHTML='<div class=empty>Pick a run on the left. ● = running now.</div>';return}
+
+  // run-level progress events (no per-record company+name) — kept OUT of the
+  // table so a 10k-row run never buries them; shown in the Run info tab instead.
+  const general=mapped.filter(({e})=>!(e.company&&e.name)).filter(x=>tech||!x.h.technical);
+
+  if(view==='info'){
+    let html='';
+    if(selMeta){
+      html+=`<div class=card><h4>${esc(selMeta.name||'run')}</h4>`;
+      if(selMeta.desc)html+=`<div class=row>${esc(selMeta.desc)}</div>`;
+      html+=`<div class=row><small>${esc(selMeta.when||'')}${selMeta.kind?' · '+esc(selMeta.kind):''}</small></div>`;
+      if(selMeta.path)html+=`<div class=row><small style="font-family:ui-monospace,monospace;opacity:.75">${esc(selMeta.path)}</small></div>`;
+      html+='</div>';
+    }
+    html+=`<div class=card><h4 style="color:var(--dim)">Run progress</h4>`+
+      (general.length?general.map(({h})=>`<div class=row><span class=${h.cls}>${h.icon} ${h.text}${h.detail?` <small style="color:var(--dim)">— ${esc(h.detail)}</small>`:''}</span></div>`).join('')
+        :'<div class=row><small>no progress events yet</small></div>')+'</div>';
+    content.innerHTML=html;
+    return;
+  }
+
+  const hs=mapped.filter(x=>tech||!x.h.technical);
+  if(!hs.length){content.innerHTML='<div class=empty>No events yet — they appear here within ~2s of happening.</div>';return}
+  if(view==='feed'){
+    content.innerHTML=hs.map(({e,h})=>`<div class=line><span class=when>${(e.ts||'').slice(11,19)}</span><span>${h.icon}</span><span class=${h.cls}>${h.text}${h.detail?`<br><small style="color:var(--dim)">${esc(h.detail)}</small>`:''}</span></div>`).join('');
+    if(autoscroll)content.scrollTop=content.scrollHeight;
+    return;
+  }
+  // records: one table row per (company, person); events fold into columns
+  const rows={};
+  const key=(co,name)=>co+'|'+(name||'—');
+  for(const e of all){
+    const a=e.action||e.event||'';
+    if(a==='bc_submitted'){
+      for(const c of (e.contacts||[])){
+        const r=rows[key(c.company,c.name)]=rows[key(c.company,c.name)]||{company:c.company,name:c.name};
+        r.tier=c.tier; r.phoneState=r.phoneState||'searching…';
+      }
+      continue;
+    }
+    if(!e.company||!e.name)continue;
+    const r=rows[key(e.company,e.name)]=rows[key(e.company,e.name)]||{company:e.company,name:e.name};
+    if(e.tier!==undefined)r.tier=e.tier;
+    if(a==='phone_found'){r.phone=e.phone;r.phoneState='found'}
+    if(a==='phone_not_found'){r.phoneState='none'}
+    if(a==='email_found'){r.email=e.email;r.emailSource=e.source;r.emailState='found'}
+    if(a==='email_not_found'){r.emailState='none'}
+    if(e.crm_id)r.hs=e.crm_id;
+  }
+  const list=Object.values(rows).sort((a,b)=>(a.company||'').localeCompare(b.company||'')||(a.tier??9)-(b.tier??9));
+  const pill=(state,val,extra)=>{
+    if(val)return `<span class="pill ok">${esc(val)}</span>${extra?` <small style="color:var(--dim)">${esc(extra)}</small>`:''}`;
+    if(state==='none')return '<span class="pill warn">not found</span>';
+    if(state)return `<span class="pill dim">${esc(state)}</span>`;
+    return '<span class="pill dim">—</span>';
+  };
+  const tierLabel={1:'Tier 1',2:'Tier 2',3:'Tier 3',4:'Tier 4',5:'Tier 5'};
+  content.innerHTML=list.length
+    ?`<table><tr><th>Company</th><th>Person</th><th>Tier</th><th>Phone</th><th>Email</th><th>CRM id</th></tr>`+
+      list.map((r,i)=>{
+        const first=i===0||list[i-1].company!==r.company;
+        return `<tr><td>${first?`<b>${esc(r.company)}</b>`:''}</td><td>${esc(r.name)}</td>`+
+        `<td><small>${tierLabel[r.tier]??''}</small></td>`+
+        `<td>${pill(r.phoneState,r.phone)}</td><td>${pill(r.emailState,r.email,r.emailSource)}</td>`+
+        `<td>${r.hs?`<span class="pill ok">${esc(r.hs)}</span>`:'<span class="pill dim">—</span>'}</td></tr>`;
+      }).join('')+'</table>'
+    :'<div class=empty>No per-person results yet — see the Run info tab for progress.</div>';
+}
+
+function renderStats(){
+  const s={phones:0,emails:0,misses:0,writes:0,assoc:0,errors:0};
+  let credits, creditsLeft;
+  for(const e of all){
+    const a=e.action||e.event||'';
+    if(a==='phone_found')s.phones++;
+    if(a==='email_found')s.emails++;
+    if(/not_found/.test(a))s.misses++;
+    if(e.credits_consumed!==undefined)credits=e.credits_consumed;
+    if(e.credits_left!==undefined)creditsLeft=e.credits_left;
+    if(e.endpoint&&/POST|PATCH|PUT|DELETE/.test(e.endpoint)&&!/search/i.test(e.endpoint)&&e.status_code<300)s.writes++;
+    if(/associat/i.test(e.endpoint||'')&&e.status_code<300)s.assoc++;
+    if(/error|fail|timeout/i.test(a)||(e.status_code>=400))s.errors++;
+  }
+  const items={'phones found':s.phones,'emails found':s.emails,'no result':s.misses,
+    'CRM writes':s.writes,'associations':s.assoc,'credits used':credits,'credits left':creditsLeft,'errors':s.errors};
+  document.getElementById('stats').innerHTML=Object.entries(items)
+    .filter(([,v])=>v!==undefined&&v!==0||['phones found','emails found'].includes(arguments[0]))
+    .filter(([,v])=>v!==undefined)
+    .map(([k,v])=>`<span class=chip><b class="${k==='errors'&&v?'err':'ok'}">${v}</b><small>${k}</small></span>`).join('');
+}
+
+async function poll(){
+  try{
+    const lk=await (await fetch('/api/locks')).json();
+    document.getElementById('locks').innerHTML=lk.length?lk.map(l=>
+      `<div class=lock><span class=${l.alive?'live':'dead'}>${l.alive?'●':'○'}</span> <b>${esc(l.scope)}</b> — process ${l.pid}${l.alive?', running':' (stale, safe to ignore)'}<br><small style="color:var(--dim)">since ${esc(l.started||'?')}</small></div>`).join('')
+      :'<div class=empty style="padding:6px">nothing running</div>';
+    const runs=await (await fetch('/api/runs')).json();
+    window._runs=runs;
+    const q=(document.getElementById('q').value||'').toLowerCase();
+    document.getElementById('runs').innerHTML=runs.filter(r=>(r.name+r.label+(r.desc||'')).toLowerCase().includes(q)).map(r=>
+      `<div class="run ${sel===r.id?'sel':''}" onclick="pick('${r.id}')"><span class=${r.live?'live':'dead'}>${r.live?'● running':'○'}</span> <b>${esc(r.name||r.label)}</b><small>${esc(r.when||'')}${r.desc?' — '+esc(r.desc):''}</small></div>`
+    ).join('');
+    // deep link: restore the run named in the URL hash after the first runs load
+    if(!sel&&location.hash.length>1){
+      const want=decodeURIComponent(location.hash.slice(1));
+      if(runs.some(r=>r.id===want))pick(want,true);
+    }
+    if(sel){
+      const res=await (await fetch('/api/events?run='+encodeURIComponent(sel)+'&offsets='+encodeURIComponent(JSON.stringify(offsets)))).json();
+      offsets=res.offsets;
+      if(res.events.length){all.push(...res.events);render();}
+    }
+  }catch(err){/* server restarting — retry */}
+  setTimeout(poll,2000);
+}
+function pick(id,fromHash){
+  sel=id;selMeta=(window._runs||[]).find(r=>r.id===id)||null;offsets={};all=[];
+  if(!fromHash)location.hash=encodeURIComponent(id);
+  render();
+}
+window.addEventListener('hashchange',()=>{
+  const want=decodeURIComponent(location.hash.slice(1));
+  if(want&&want!==sel&&(window._runs||[]).some(r=>r.id===want))pick(want,true);
+});
+function toggleSide(){
+  const collapsed=document.body.classList.toggle('noside');
+  localStorage.setItem('noside', collapsed?'1':'');
+  document.getElementById('sideToggle').textContent=collapsed?'▶':'◀';
+}
+if(localStorage.getItem('noside')){document.body.classList.add('noside');document.getElementById('sideToggle').textContent='▶';}
+render();
+poll();
+</script>"""
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def _json(self, obj):
+        body = json.dumps(obj).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        from urllib.parse import urlparse, parse_qs
+        u = urlparse(self.path)
+        if u.path == '/':
+            body = PAGE.encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif u.path == '/api/runs':
+            self._json(list_runs())
+        elif u.path == '/api/locks':
+            self._json(locks())
+        elif u.path == '/api/explain':
+            # Read EXPLAIN.md fresh every time (statement of intent must be current).
+            found, md = False, ''
+            seen = set()
+            for d in [os.environ.get('RUNGUARD_STATE_DIR')] + list(SOURCES.values()) + [BASE]:
+                if not d:
+                    continue
+                p = os.path.abspath(os.path.join(d, 'EXPLAIN.md'))
+                if p in seen or not os.path.isfile(p):
+                    seen.add(p)
+                    continue
+                seen.add(p)
+                try:
+                    with open(p, encoding='utf-8') as fh:
+                        md, found = fh.read(), True
+                    break
+                except OSError:
+                    pass
+            self._json({'found': found, 'markdown': md})
+        elif u.path == '/api/events':
+            q = parse_qs(u.query)
+            run_id = (q.get('run') or [''])[0]
+            try:
+                offsets = json.loads((q.get('offsets') or ['{}'])[0])
+            except json.JSONDecodeError:
+                offsets = {}
+            events, new_offsets = read_events(run_id, offsets)
+            self._json({'events': events[-500:], 'offsets': new_offsets})
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+
+if __name__ == '__main__':
+    print(f'run observer → http://localhost:{PORT}')
+    HTTPServer(('127.0.0.1', PORT), Handler).serve_forever()
