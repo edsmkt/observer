@@ -183,6 +183,7 @@ def read_events(run_id, offsets):
 
 
 PAGE = """<!doctype html><meta charset="utf-8"><title>Run observer</title>
+<link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzMiAzMiI+PHJlY3Qgd2lkdGg9IjMyIiBoZWlnaHQ9IjMyIiByeD0iNyIgZmlsbD0iIzBmMTMxNyIvPjxnIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzU3Yzk4YSIgc3Ryb2tlLXdpZHRoPSIyLjIiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCI+PGNpcmNsZSBjeD0iMTAuNSIgY3k9IjE3IiByPSI0LjYiLz48Y2lyY2xlIGN4PSIyMS41IiBjeT0iMTciIHI9IjQuNiIvPjxwYXRoIGQ9Ik0xNS4xIDE2IGgxLjgiLz48cGF0aCBkPSJNNS45IDE1LjUgTDMuNSAxMi44Ii8+PHBhdGggZD0iTTI2LjEgMTUuNSBMMjguNSAxMi44Ii8+PC9nPjwvc3ZnPg==">
 <style>
 :root{--bg:#0f1317;--panel:#181e25;--card:#1e262f;--txt:#e6ebf0;--dim:#8b96a3;--ok:#57c98a;--warn:#e5b95a;--err:#e5756a;--info:#6fa8e0;--line:#28313c}
 *{box-sizing:border-box}
@@ -207,7 +208,7 @@ h3{margin:10px 0 8px;font-size:11px;color:var(--dim);text-transform:uppercase;le
 .live{color:var(--ok)}.dead{color:var(--dim)}
 .line{padding:5px 0;border-bottom:1px solid var(--line);display:flex;gap:10px;align-items:baseline}
 .line .when{color:var(--dim);font-size:11.5px;min-width:56px;font-family:ui-monospace,monospace}
-.ok{color:var(--ok)}.warn{color:var(--warn)}.err{color:var(--err)}.info{color:var(--info)}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.err{color:var(--err)}.info{color:var(--info)}.dim{color:var(--dim)}
 .card{background:var(--card);border-radius:10px;padding:12px 16px;margin-bottom:10px}
 .card h4{margin:0 0 6px;font-size:14.5px}
 .card .row{padding:3px 0;color:var(--txt)}
@@ -411,6 +412,30 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape')closeChat();});
 document.addEventListener('click',e=>{const pop=document.getElementById('chatpop');if(pop.style.display==='block'&&!pop.contains(e.target)&&!e.target.closest('[data-col]'))closeChat();});
 
 function esc(s){return String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+function fmt(v){return v===true?'✓':v===false?'—':(v==null?'':(typeof v==='object'?JSON.stringify(v):String(v)));}
+// Generic outcome coloring — classify a value into ok/warn/err/dim by a universal
+// vocabulary (source, sink, status, condition all read the same way). No per-workflow
+// hardcoding; returns '' for values that aren't outcome-ish (names, ids, free text).
+function outcomeClass(v){
+  const s=String(v).trim().toLowerCase();
+  if(!s||s==='—'||s==='-'||s==='n/a'||s==='na')return 'dim';
+  if(/(fail|error|refus|reject|timeout|exception|invalid|denied|✗|❌|\b[45]\d\d\b)/.test(s))return 'err';
+  if(/(skip|not met|not_met|excluded|exclude|held|blocked|pending|queued|searching|missing|unmatched)/.test(s))return 'warn';
+  if(/(done|ok|success|inserted|upserted|pushed|written|created|updated|added|appended|found|matched|sent|complete|synced|✓|^yes$|^true$)/.test(s))return 'ok';
+  return '';
+}
+// A column is "categorical" (worth coloring + counting) if it repeats values and
+// has few distinct ones — that targets status/source/sink columns and skips names/ids.
+function catColumns(rows, cols){
+  const cats=new Set();
+  for(const c of cols){
+    const vals=rows.map(r=>r[c]).filter(v=>v!=null&&v!=='');
+    if(!vals.length||vals.every(v=>typeof v==='number'))continue;
+    const distinct=new Set(vals.map(v=>String(fmt(v))));
+    if(distinct.size<=12 && distinct.size<vals.length)cats.add(c);
+  }
+  return cats;
+}
 
 // Turn a raw event into {icon, text, cls, company, detail} — plain English.
 function humanize(e){
@@ -563,7 +588,6 @@ function render(){
         r[f]=v;
       }
     }
-    const fmt=v=>v===true?'✓':v===false?'—':(v==null?'':(typeof v==='object'?JSON.stringify(v):String(v)));
     const gwas=p=>p!==undefined?` <small style="color:var(--warn)">· was ${esc(fmt(p))}</small>`:'';
     // one SUB-TAB per table (companies / contacts / …) instead of stacking them —
     // a workflow step's output gets its own tab, not buried under the previous step's rows.
@@ -572,6 +596,14 @@ function render(){
     if(gorder.length>1)
       html+='<div class=subtabs>'+gorder.map(t=>`<span class="subtab ${t===recTab?'sel':''}" onclick="setRecTab('${esc(t)}')">${esc(t)} <small>· ${groups[t].order.length}</small></span>`).join('')+'</div>';
     const g=groups[recTab], cols=g.cols;
+    // categorical columns (status / source / sink / condition …) render as colored
+    // outcome pills; free-text/id columns stay plain. Fully data-driven.
+    const cats=catColumns(g.order.map(k=>g.rows[k]), cols);
+    const gcell=(c,v)=>{
+      const disp=esc(fmt(v));
+      if(cats.has(c)&&v!=null&&v!=='')return `<span class="pill ${outcomeClass(v)||'dim'}">${disp}</span>`;
+      return disp;
+    };
     // width keyed by table::col so same-named cols in different tables resize independently
     const gbase=Object.fromEntries(cols.map(c=>[c,colW[recTab+'::'+c]??COLW_DEFAULT[c]??150]));
     if(!cols.some(c=>colW[recTab+'::'+c]!=null)){
@@ -582,7 +614,7 @@ function render(){
     html+=`<div class=tablewrap><table style="width:${gtot}px"><tr>${cols.map(c=>`<th data-col="${esc(recTab+'::'+c)}" style="width:${gbase[c]}px">${esc(c)}<span class=rz></span></th>`).join('')}</tr>`+
       g.order.map(k=>{const r=g.rows[k];
         return `<tr data-key="${esc(recTab+'::'+k)}" data-co="${esc(k)}" data-name="${esc(k)}">`+
-          cols.map(c=>`<td data-col="${esc(recTab+'::'+c)}">${esc(fmt(r[c]))}${gwas(r.__prev[c])}</td>`).join('')+`</tr>`;
+          cols.map(c=>`<td data-col="${esc(recTab+'::'+c)}">${gcell(c,r[c])}${gwas(r.__prev[c])}</td>`).join('')+`</tr>`;
       }).join('')+'</table></div>';
     content.innerHTML=html||'<div class=empty>No records yet.</div>';
     decorateChat();
@@ -674,15 +706,14 @@ function renderStats(){
   const chips=[];
   const tables=Object.keys(recByTable);
   if(tables.length){
-    for(const t of tables) chips.push([t, Object.keys(recByTable[t]).length]);   // row count per table
-    // boolean coverage of the ACTIVE table — derived from its own fields, not assumed
-    const active=tables.includes(recTab)?recTab:tables[0];
-    const rows=Object.values(recByTable[active]);
-    const SKIP=new Set(['ts','event','action','_file','key','table']);
-    const cols=[]; for(const r of rows) for(const k of Object.keys(r)) if(!SKIP.has(k)&&!cols.includes(k)) cols.push(k);
-    for(const c of cols){
-      const vals=rows.map(r=>r[c]).filter(v=>v!=null&&v!=='');
-      if(vals.length&&vals.every(v=>typeof v==='boolean')){const n=vals.filter(Boolean).length; chips.push([`${c} · ${active}`, n]);}
+    for(const t of tables) chips.push([t, Object.keys(recByTable[t]).length]);   // companies, people, …
+    // plus the engineer's own headline totals from run_finished (numeric fields only) —
+    // e.g. emails_found, total_contacts. A few final numbers, not a per-value breakdown;
+    // the colored cells carry the "what landed where" detail.
+    const fin=[...all].reverse().find(e=>(e.event||e.action)==='run_finished');
+    if(fin) for(const [k,v] of Object.entries(fin)){
+      if(['ts','event','action','_file','errors'].includes(k)||typeof v!=='number'||tables.includes(k))continue;
+      chips.push([k.replace(/_/g,' '), v, outcomeClass(k)||'ok']);
     }
   } else if(enrichRun){
     chips.push(['phones found',s.phones],['emails found',s.emails]);
@@ -692,10 +723,10 @@ function renderStats(){
   }
   for(const [p,c] of Object.entries(prov))          // one chip per provider
     chips.push([`${p} credits${c.left!==undefined?` · ${c.left} left`:''}`, c.used??0]);
-  if(errors)chips.push(['errors',errors]);
+  if(errors)chips.push(['errors',errors,'err']);
   document.getElementById('stats').innerHTML=chips
     .filter(([,v])=>v!==undefined)
-    .map(([k,v])=>`<span class=chip><b class="${String(k).startsWith('errors')&&v?'err':'ok'}">${v}</b><small>${esc(k)}</small></span>`).join('');
+    .map(([k,v,cls])=>`<span class=chip><b class="${cls||'ok'}">${v}</b><small>${esc(k)}</small></span>`).join('');
 }
 
 async function poll(){

@@ -47,19 +47,29 @@ The dashboard is **not** hardcoded to contacts/phones/emails. Log a generic
 fields you logged — for *any* pipeline:
 
 ```python
-runguard.ledger('my-run', 'record', table='companies',
-                key=domain, company=domain, contacts=len(people),
-                top_tier=1, sources='blitz,ai_ark', linkedin=True)
+# log where each row came FROM and went TO — lineage is just more columns
+runguard.ledger('my-run', 'record', table='companies', key=domain,
+                company=domain, source='northdata',        # pulled_from
+                condition='met', supabase='inserted',       # per-sink outcomes
+                hubspot='pushed', csv='written', status='done')
 ```
 
 - **`table`** groups records into separate **sub-tabs** — a multi-step workflow
   emits a different shape at each step (e.g. `companies` → `contacts` → `enriched`),
   each its own table, so a later step's rows don't bury an earlier one's.
 - **`key`** is the row identity — repeat it to update a row in place; a changed
-  value renders `· was X` (before/after).
-- Every other field becomes a **column**, in first-seen order. Booleans show ✓/—.
-  The top counters are **derived from the data** (row count per table + boolean
-  coverage), not hardcoded metrics.
+  value renders `· was X` (before/after). Log the outcome onto the same key at each
+  step and the row accumulates its whole path (source → each sink).
+- Every other field becomes a **column**, in first-seen order. A destination
+  (`supabase`, `hubspot`, `cloudflare`, `csv`, a webhook…) or a source is just a
+  column — there's no fixed list.
+- **Outcome columns auto-color**: values are classed green (`done/ok/inserted/pushed/
+  written/created/appended`), amber (`skipped/not met/held/pending`), red (`fail/
+  error/refused/4xx/5xx`), grey (`—`/not attempted) by a universal vocabulary — no
+  per-workflow config. So "what landed where" reads straight off the colored cells.
+- **Top bar stays lean**: per-table row counts (companies, people…), the run's own
+  headline totals from `run_finished` (e.g. `emails_found`), and credits used — not
+  a per-value dump.
 - Table UX applies everywhere: first column frozen on horizontal scroll, sticky
   header on vertical scroll, drag a header edge to resize, double-click a cell to
   expand long values, click any cell/header to chat.
