@@ -41,16 +41,25 @@ need into the target project (vendor them; don't import from the skill dir):
      refuses to run twice, while different datasets run in parallel.
    - `ledger('<scope>', 'run_started', description='...')`, one event per
      meaningful outcome, then `'run_finished'`. These events feed the dashboard.
+   - To populate the dashboard's **Data** table for ANY workflow, emit generic
+     `record` events — do NOT hardcode columns: `ledger(scope, 'record',
+     table='companies', key=<id>, <field>=<value>, …)`. Each `table` is its own
+     sub-tab (one per pipeline step: companies → contacts → enriched), `key` is the
+     row identity (repeat to update, showing `· was X`), and every other field
+     becomes an auto-derived column. Booleans render ✓/—; counters are derived from
+     the data.
    - `throttle('<provider>', <per_second>)` before every call to a shared API,
      so parallel runs share one rate budget (rate limits are per account).
    - If a shared client library performs the writes, call `acquire_lock` INSIDE
      its mutating method (gate on HTTP verb, exempt reads) — then every future
      script inherits the guard for free.
 
-2. **`run_dashboard.py`** — the observer (a SAMPLE; adapt it). Point its
-   `SOURCES` at the project's ledger directory, run `python3 run_dashboard.py`,
-   open http://localhost:8484. Remap `humanize()` and the table columns to the
-   events this workflow logs. It is read-only — it never touches a run.
+2. **`run_dashboard.py`** — the observer. Point its `SOURCES` at the project's
+   ledger directory, run `python3 run_dashboard.py`, open http://localhost:8484.
+   The **Data** tab auto-builds tables from your `record` events (no column
+   config needed); the bundled phone/email/CRM renderer is just an *example* that
+   activates for `phone_found`/`email_found` events. It is read-only — never
+   touches a run.
 
 3. **`EXPLAIN.md`** — WRITE THIS for the project, in the state dir, **before**
    the run spends anything. Plain English + one ASCII flow diagram of what THIS

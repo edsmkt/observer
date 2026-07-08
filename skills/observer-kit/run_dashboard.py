@@ -202,7 +202,10 @@ h3{margin:10px 0 8px;font-size:11px;color:var(--dim);text-transform:uppercase;le
 .card h4{margin:0 0 6px;font-size:14.5px}
 .card .row{padding:3px 0;color:var(--txt)}
 .card .row small{color:var(--dim)}
-.tablewrap{overflow-x:auto;border-radius:10px}
+.tablewrap{overflow:auto;max-height:calc(100vh - 150px);border-radius:10px}
+.subtabs{display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap}
+.subtab{padding:4px 12px;border-radius:7px;background:var(--card);color:var(--dim);cursor:pointer;font-size:12.5px}
+.subtab.sel{background:#2c3948;color:var(--txt)}
 table{table-layout:fixed;border-collapse:separate;border-spacing:0;background:var(--card)}
 th{position:sticky;top:0;z-index:2;background:#242e3a;text-align:left;padding:9px 12px;font-size:11.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 td{padding:8px 12px;border-top:1px solid var(--line);vertical-align:top;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -257,7 +260,7 @@ th[data-col]:hover,td[data-col]:hover{outline:1px solid #34506e;outline-offset:-
 <div id=main>
   <div id=topbar>
     <div class=tabs>
-      <div class="tab sel" id=tabRecords onclick="view='records';render()">Per company</div>
+      <div class="tab sel" id=tabRecords onclick="view='records';render()">Data</div>
       <div class=tab id=tabFeed onclick="view='feed';render()">Timeline</div>
       <div class=tab id=tabInfo onclick="view='info';render()">Run info</div>
       <div class=tab id=tabExplain onclick="view='explain';render()">How it works</div>
@@ -285,7 +288,8 @@ th[data-col]:hover,td[data-col]:hover{outline:1px solid #34506e;outline-offset:-
   </div>
 </div>
 <script>
-let sel=null, offsets={}, all=[], view='records', chatByAnchor={}, chatOpenAnchor=null, colW={};
+let sel=null, offsets={}, all=[], view='records', chatByAnchor={}, chatOpenAnchor=null, colW={}, recTab=null;
+function setRecTab(t){recTab=t;render();}
 const COLW_DEFAULT={Company:190,Person:150,Tier:80,Phone:170,Email:230,'CRM id':120};
 try{colW=JSON.parse(localStorage.getItem('observer_colw')||'{}')}catch(e){}
 const content=document.getElementById('content');
@@ -523,6 +527,57 @@ function render(){
     if(autoscroll)content.scrollTop=content.scrollHeight;
     return;
   }
+  // GENERIC records table: any run that logs `record` events gets a table whose
+  // columns are auto-derived from the fields on those events (first-seen order).
+  // Works for ANY workflow — not just contact enrichment. First column frozen,
+  // resize/expand/scroll/chat all apply. Falls through to the enrichment table below
+  // when a run has no `record` events.
+  const recEvents=all.filter(e=>(e.event||e.action)==='record');
+  if(recEvents.length){
+    const SKIP=new Set(['ts','event','action','_file','key','table']);
+    // group records by their `table` field: a multi-step workflow emits different
+    // shapes at each step (companies → contacts → enriched…), each its own table.
+    const groups={}, gorder=[];
+    for(const e of recEvents){
+      const t=e.table||'records';
+      if(!groups[t]){groups[t]={rows:{},order:[],cols:[]};gorder.push(t);}
+      const g=groups[t];
+      const k=String(e.key ?? e.company ?? e.name ?? JSON.stringify(e));
+      let r=g.rows[k];
+      if(!r){r=g.rows[k]={__prev:{}};g.order.push(k);}
+      for(const f of Object.keys(e)){
+        if(SKIP.has(f))continue;
+        if(!g.cols.includes(f))g.cols.push(f);
+        const v=e[f];
+        if(r[f]!==undefined&&r[f]!==v)r.__prev[f]=r[f];
+        r[f]=v;
+      }
+    }
+    const fmt=v=>v===true?'✓':v===false?'—':(v==null?'':(typeof v==='object'?JSON.stringify(v):String(v)));
+    const gwas=p=>p!==undefined?` <small style="color:var(--warn)">· was ${esc(fmt(p))}</small>`:'';
+    // one SUB-TAB per table (companies / contacts / …) instead of stacking them —
+    // a workflow step's output gets its own tab, not buried under the previous step's rows.
+    if(!gorder.includes(recTab))recTab=gorder[0];
+    let html='';
+    if(gorder.length>1)
+      html+='<div class=subtabs>'+gorder.map(t=>`<span class="subtab ${t===recTab?'sel':''}" onclick="setRecTab('${esc(t)}')">${esc(t)} <small>· ${groups[t].order.length}</small></span>`).join('')+'</div>';
+    const g=groups[recTab], cols=g.cols;
+    // width keyed by table::col so same-named cols in different tables resize independently
+    const gbase=Object.fromEntries(cols.map(c=>[c,colW[recTab+'::'+c]??COLW_DEFAULT[c]??150]));
+    if(!cols.some(c=>colW[recTab+'::'+c]!=null)){
+      const avail=(content.clientWidth||1000)-4, sum=cols.reduce((s,c)=>s+gbase[c],0);
+      if(sum<avail){const kk=avail/sum;cols.forEach(c=>gbase[c]=Math.round(gbase[c]*kk));}
+    }
+    const gtot=cols.reduce((s,c)=>s+gbase[c],0);
+    html+=`<div class=tablewrap><table style="width:${gtot}px"><tr>${cols.map(c=>`<th data-col="${esc(recTab+'::'+c)}" style="width:${gbase[c]}px">${esc(c)}<span class=rz></span></th>`).join('')}</tr>`+
+      g.order.map(k=>{const r=g.rows[k];
+        return `<tr data-key="${esc(recTab+'::'+k)}" data-co="${esc(k)}" data-name="${esc(k)}">`+
+          cols.map(c=>`<td data-col="${esc(recTab+'::'+c)}">${esc(fmt(r[c]))}${gwas(r.__prev[c])}</td>`).join('')+`</tr>`;
+      }).join('')+'</table></div>';
+    content.innerHTML=html||'<div class=empty>No records yet.</div>';
+    decorateChat();
+    return;
+  }
   // records: one table row per (company, person); events fold into columns
   const rows={};
   const key=(co,name)=>co+'|'+(name||'—');
@@ -576,35 +631,61 @@ function render(){
 }
 
 function renderStats(){
-  const s={phones:0,emails:0,misses:0,writes:0,assoc:0,errors:0};
-  const prov={};  // provider -> {used, left}: per-provider credit counters
+  // Fully data-driven — NOTHING hardcoded to phones/emails/CRM. For runs that emit
+  // generic `record` events, the counters are derived from the records themselves:
+  // one chip per table (row count) + the ACTIVE table's boolean columns as coverage
+  // counts (e.g. "62 linkedin", "5 fallback"). Per-provider credits and errors always
+  // show (any run can spend or fail). Enrichment runs (phone/email events) keep their
+  // familiar chips as a fallback.
+  const prov={}; let errors=0;
+  const recByTable={};   // table -> {key -> merged row}
+  let enrichRun=false; const s={phones:0,emails:0,misses:0,writes:0,assoc:0};
   for(const e of all){
     const a=e.action||e.event||'';
-    if(a==='phone_found')s.phones++;
-    if(a==='email_found')s.emails++;
+    if(a==='record'){
+      const t=e.table||'records', g=recByTable[t]=recByTable[t]||{};
+      const k=String(e.key ?? e.company ?? e.name ?? JSON.stringify(e));
+      g[k]=Object.assign(g[k]||{}, e);
+    }
+    if(a==='phone_found'){s.phones++;enrichRun=true;}
+    if(a==='email_found'){s.emails++;enrichRun=true;}
+    if(a==='bc_submitted'||a==='phone_not_found'||a==='email_not_found')enrichRun=true;
     if(/not_found/.test(a))s.misses++;
-    // credits: a `credits` event carries a `provider`; legacy `bc_credits` is one provider
     if(a==='credits'||a==='bc_credits'){
-      const p=e.provider||'provider';
-      const c=prov[p]=prov[p]||{};
+      const p=e.provider||'provider', c=prov[p]=prov[p]||{};
       const used=e.used??e.credits_consumed, left=e.left??e.credits_left;
       if(used!==undefined)c.used=used;
       if(left!==undefined)c.left=left;
     }
     if(e.endpoint&&/POST|PATCH|PUT|DELETE/.test(e.endpoint)&&!/search/i.test(e.endpoint)&&e.status_code<300)s.writes++;
     if(/associat/i.test(e.endpoint||'')&&e.status_code<300)s.assoc++;
-    if(/error|fail|timeout/i.test(a)||(e.status_code>=400))s.errors++;
+    if(/error|fail|timeout/i.test(a)||(e.status_code>=400))errors++;
   }
-  const chips=[['phones found',s.phones],['emails found',s.emails]];
-  if(s.misses)chips.push(['no result',s.misses]);
-  if(s.writes)chips.push(['CRM writes',s.writes]);
-  if(s.assoc)chips.push(['associations',s.assoc]);
+  const chips=[];
+  const tables=Object.keys(recByTable);
+  if(tables.length){
+    for(const t of tables) chips.push([t, Object.keys(recByTable[t]).length]);   // row count per table
+    // boolean coverage of the ACTIVE table — derived from its own fields, not assumed
+    const active=tables.includes(recTab)?recTab:tables[0];
+    const rows=Object.values(recByTable[active]);
+    const SKIP=new Set(['ts','event','action','_file','key','table']);
+    const cols=[]; for(const r of rows) for(const k of Object.keys(r)) if(!SKIP.has(k)&&!cols.includes(k)) cols.push(k);
+    for(const c of cols){
+      const vals=rows.map(r=>r[c]).filter(v=>v!=null&&v!=='');
+      if(vals.length&&vals.every(v=>typeof v==='boolean')){const n=vals.filter(Boolean).length; chips.push([`${c} · ${active}`, n]);}
+    }
+  } else if(enrichRun){
+    chips.push(['phones found',s.phones],['emails found',s.emails]);
+    if(s.misses)chips.push(['no result',s.misses]);
+    if(s.writes)chips.push(['CRM writes',s.writes]);
+    if(s.assoc)chips.push(['associations',s.assoc]);
+  }
   for(const [p,c] of Object.entries(prov))          // one chip per provider
     chips.push([`${p} credits${c.left!==undefined?` · ${c.left} left`:''}`, c.used??0]);
-  if(s.errors)chips.push(['errors',s.errors]);
+  if(errors)chips.push(['errors',errors]);
   document.getElementById('stats').innerHTML=chips
     .filter(([,v])=>v!==undefined)
-    .map(([k,v])=>`<span class=chip><b class="${k==='errors'&&v?'err':'ok'}">${v}</b><small>${esc(k)}</small></span>`).join('');
+    .map(([k,v])=>`<span class=chip><b class="${String(k).startsWith('errors')&&v?'err':'ok'}">${v}</b><small>${esc(k)}</small></span>`).join('');
 }
 
 async function poll(){

@@ -19,9 +19,9 @@ no dependencies:
 
 ## What it looks like
 
-**Per company** — one row per item; pills fill in live as results land:
+**Data** — one row per item; columns are whatever the run logs, and pills fill in live as results land:
 
-![Per company view](assets/per-company.png)
+![Data view](assets/per-company.png)
 
 **Timeline** — every step in plain English, newest work as it happens:
 
@@ -39,6 +39,34 @@ next run shows **before/after** inline (`· was X`) so you see what changed —
 before committing the full (expensive) run.
 
 ![Inline chat anchored to a cell](assets/collaborate.png)
+
+## Any workflow, any columns
+
+The dashboard is **not** hardcoded to contacts/phones/emails. Log a generic
+`record` event and the **Data** tab builds a table whose columns are exactly the
+fields you logged — for *any* pipeline:
+
+```python
+runguard.ledger('my-run', 'record', table='companies',
+                key=domain, company=domain, contacts=len(people),
+                top_tier=1, sources='blitz,ai_ark', linkedin=True)
+```
+
+- **`table`** groups records into separate **sub-tabs** — a multi-step workflow
+  emits a different shape at each step (e.g. `companies` → `contacts` → `enriched`),
+  each its own table, so a later step's rows don't bury an earlier one's.
+- **`key`** is the row identity — repeat it to update a row in place; a changed
+  value renders `· was X` (before/after).
+- Every other field becomes a **column**, in first-seen order. Booleans show ✓/—.
+  The top counters are **derived from the data** (row count per table + boolean
+  coverage), not hardcoded metrics.
+- Table UX applies everywhere: first column frozen on horizontal scroll, sticky
+  header on vertical scroll, drag a header edge to resize, double-click a cell to
+  expand long values, click any cell/header to chat.
+
+The bundled contact-enrichment view (phones/emails/CRM pills) is just the *example*
+renderer that kicks in for `phone_found`/`email_found` events — remove it or ignore
+it; `record` events are the general path.
 
 ## Install
 

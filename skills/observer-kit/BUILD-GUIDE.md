@@ -169,8 +169,18 @@ writers.
 
 ### Event vocabulary (the dashboard's contract)
 
-Per-record events MUST carry `company` + `name` — that pair is the table's row
-key. The dashboard gives first-class rendering to:
+**The general, non-hardcoded path: `record` events.** Any workflow populates the
+dashboard's **Data** tab by logging `ledger(scope, 'record', table='<name>',
+key='<row id>', <field>=<value>, …)`. The dashboard groups records by `table`
+into sub-tabs (one per pipeline step), uses `key` as the row identity (repeat a
+key to update a row in place → renders `· was X`), and auto-derives columns from
+whatever fields you send (first-seen order; booleans render ✓/—; the top counters
+are derived from the data). No column config, no `humanize()` edits. Use this for
+any pipeline — companies, contacts, documents, whatever.
+
+The phone/email/CRM rendering below is just the bundled EXAMPLE renderer that
+activates for `phone_found`/`email_found` events. Per-record enrichment events
+carry `company` + `name` as the row key. The dashboard gives first-class rendering to:
 
 `run_started` (fields: companies/todo, worst_case_credits) · `run_finished`
 (any stats) · `bc_submitted` (round, leads, contacts:[{id,company,name,tier}]
