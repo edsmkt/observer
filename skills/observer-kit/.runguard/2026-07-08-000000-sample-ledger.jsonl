@@ -10,3 +10,5 @@
 {"ts": "2026-07-08T11:35:22", "event": "phone_not_found", "company": "acme-widgets.de", "name": "Cem Celik", "tier": 5}
 {"ts": "2026-07-08T11:35:22", "event": "bc_credits", "credits_consumed": 3, "credits_left": 2}
 {"ts": "2026-07-08T11:35:22", "event": "run_finished", "credits_spent": 3, "companies_at_cap": 0}
+{"ts": "2026-07-08T11:40:00", "event": "sample_iteration", "n": 2, "note": "adjusted: prefer landline for Ben"}
+{"ts": "2026-07-08T11:40:02", "event": "phone_found", "company": "acme-widgets.de", "name": "Ben Bauer", "tier": 2, "phone": "+49 30 5550142"}

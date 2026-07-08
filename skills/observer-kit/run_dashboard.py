@@ -34,6 +34,10 @@ SOURCES = {
                 or os.path.join(BASE, '.runguard'),
 }
 PORT = 8484
+# Inline-chat inbox: the ONLY thing this dashboard writes. Users leave notes
+# anchored to columns/cells; the agent watches this file and replies by appending
+# lines with "author":"agent". It never touches run ledgers or run state.
+CHAT_FILE = os.path.join(SOURCES['runguard'], 'chat.jsonl')
 ACTIVE_S = 120   # a file touched in the last 2 min counts as live
 
 
@@ -96,7 +100,7 @@ def list_runs():
         d = SOURCES[kind]
         if os.path.isdir(d):
             for f in os.listdir(d):
-                if f.endswith('.jsonl'):
+                if f.endswith('.jsonl') and f != 'chat.jsonl':
                     p = os.path.join(d, f)
                     mtime = os.path.getmtime(p)
                     name, when = _nice_name(f, kind)
@@ -217,6 +221,19 @@ input[type=text]{width:100%;background:#0d1114;color:var(--txt);border:1px solid
 .explain p{margin:8px 0}.explain ul{margin:6px 0 6px 18px}.explain li{margin:3px 0}
 .explain code{background:#0d1114;padding:1px 5px;border-radius:4px;font-size:12.5px}
 pre.diagram{background:#0d1114;border:1px solid var(--line);border-radius:8px;padding:12px;overflow-x:auto;font:12.5px/1.45 ui-monospace,Menlo,monospace;color:var(--txt);white-space:pre}
+[data-col]{cursor:pointer}
+th[data-col]:hover,td[data-col]:hover{outline:1px solid #34506e;outline-offset:-1px}
+.chatdot{margin-left:6px;font-size:10px;opacity:.85}
+.chatdot.resolved{color:var(--ok);opacity:1}
+#chatpop{display:none;position:fixed;z-index:50;width:320px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px;box-shadow:0 12px 34px rgba(0,0,0,.55)}
+#chatpopHead{font-size:12.5px;color:var(--info);margin-bottom:8px}
+#chatthread{max-height:220px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;margin-bottom:8px}
+#chatthread .msg{font-size:13px;border-radius:8px;padding:6px 9px;max-width:88%}
+#chatthread .msg.user{align-self:flex-end;background:#2c3948}
+#chatthread .msg.agent{align-self:flex-start;background:var(--card)}
+#chatinput{width:100%;background:#0d1114;color:var(--txt);border:1px solid var(--line);border-radius:7px;padding:7px 9px;font:13px/1.4 -apple-system,sans-serif;resize:vertical;min-height:44px}
+.chatbtn{background:var(--card);border:none;color:var(--txt);border-radius:7px;padding:6px 12px;cursor:pointer;font-size:12.5px}
+.chatbtn.primary{background:#2f6fb0;color:#fff}
 </style>
 <div id=side>
   <div id=sideHead><button id=sideToggle onclick="toggleSide()" title="Hide/show the run list">◀</button></div>
@@ -231,17 +248,88 @@ pre.diagram{background:#0d1114;border:1px solid var(--line);border-radius:8px;pa
       <div class=tab id=tabInfo onclick="view='info';render()">Run info</div>
       <div class=tab id=tabExplain onclick="view='explain';render()">How it works</div>
       <label title="Also show every raw HTTP request the run made (reads, polling). Failures always show, even unchecked."><input type=checkbox id=tech onchange="render()"> show raw API calls <span id=techCount style="color:var(--dim)"></span></label>
-      <span style="color:var(--dim);font-size:10.5px;align-self:center">v4</span>
+      <span style="color:var(--dim);font-size:10.5px;align-self:center" title="observer-kit v2 — inline chat">v2</span>
     </div>
     <div id=stats></div>
   </div>
   <div id=content><div class=empty>Pick a run on the left. ● = running now.</div></div>
 </div>
+<div id=chatpop>
+  <div id=chatpopHead></div>
+  <div id=chatthread></div>
+  <textarea id=chatinput placeholder="Tell the agent what to change here… (Enter to send, Shift+Enter = newline)" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChat();}"></textarea>
+  <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px">
+    <button class=chatbtn onclick="closeChat()">Close</button>
+    <button class="chatbtn primary" onclick="sendChat()">Send to agent</button>
+  </div>
+</div>
 <script>
-let sel=null, offsets={}, all=[], view='records';
+let sel=null, offsets={}, all=[], view='records', chatByAnchor={}, chatOpenAnchor=null;
 const content=document.getElementById('content');
 let autoscroll=true;
 content.addEventListener('scroll',()=>{autoscroll=content.scrollTop+content.clientHeight>content.scrollHeight-60});
+
+// --- inline chat (v2): click any column header or cell to leave the agent a note ---
+// Writes to a file-drop inbox the agent watches (POST /api/chat). The dashboard
+// never touches run data — the ONLY thing it writes is chat messages.
+function anchorFor(cell){
+  const col=cell.dataset.col; if(!col)return null;
+  if(cell.tagName==='TH')return 'col:'+col;
+  const tr=cell.closest('tr'); return 'cell:'+((tr&&tr.dataset.key)||'')+'|'+col;
+}
+function labelFor(cell){
+  const col=cell.dataset.col;
+  if(cell.tagName==='TH')return 'Column · '+col;
+  const tr=cell.closest('tr'); const nm=(tr&&(tr.dataset.name||tr.dataset.co))||''; return (nm?nm+' · ':'')+col;
+}
+function openChat(anchor,label,el){
+  chatOpenAnchor=anchor;
+  const pop=document.getElementById('chatpop'), r=el.getBoundingClientRect();
+  pop.style.display='block';
+  pop.style.left=Math.max(8,Math.min(r.left,window.innerWidth-336))+'px';
+  pop.style.top=Math.max(8,Math.min(r.bottom+6,window.innerHeight-300))+'px';
+  document.getElementById('chatpopHead').textContent='💬 '+label;
+  renderThread();
+  const ti=document.getElementById('chatinput'); ti.value=''; ti.focus();
+}
+function closeChat(){chatOpenAnchor=null;document.getElementById('chatpop').style.display='none';}
+function renderThread(){
+  const msgs=chatByAnchor[chatOpenAnchor]||[];
+  document.getElementById('chatthread').innerHTML=msgs.length
+    ?msgs.map(m=>`<div class="msg ${m.author==='agent'?'agent':'user'}"><b>${m.author==='agent'?'agent':'you'}</b> <small style="color:var(--dim)">${(m.ts||'').slice(11,16)}</small>${m.resolved?' <small style="color:var(--ok)">✓ resolved</small>':''}<div>${esc(m.text)}</div></div>`).join('')
+    :'<div style="color:var(--dim);font-size:12.5px">No notes here yet. Tell the agent what to change — it watches for your messages and can reply.</div>';
+  const t=document.getElementById('chatthread'); t.scrollTop=t.scrollHeight;
+}
+async function sendChat(){
+  const ti=document.getElementById('chatinput'), text=ti.value.trim();
+  if(!text||!sel||!chatOpenAnchor)return;
+  ti.value='';
+  try{await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({run:sel,anchor:chatOpenAnchor,text})});}catch(e){}
+  await loadChat();
+}
+async function loadChat(){
+  if(!sel){chatByAnchor={};return;}
+  try{
+    const msgs=await (await fetch('/api/chat?run='+encodeURIComponent(sel))).json();
+    const by={}; for(const m of msgs){(by[m.anchor]=by[m.anchor]||[]).push(m);} chatByAnchor=by;
+  }catch(e){}
+  decorateChat();
+  if(chatOpenAnchor)renderThread();
+}
+function decorateChat(){
+  content.querySelectorAll('[data-col]').forEach(cell=>{
+    const old=cell.querySelector('.chatdot'); if(old)old.remove();
+    const a=anchorFor(cell), msgs=chatByAnchor[a]||[]; if(!msgs.length)return;
+    const resolved=msgs.some(m=>m.resolved);
+    const b=document.createElement('span');
+    b.className='chatdot'+(resolved?' resolved':'');
+    b.textContent=resolved?'✓':'💬'+msgs.length;
+    cell.appendChild(b);
+  });
+}
+content.addEventListener('click',ev=>{const cell=ev.target.closest('[data-col]');if(!cell)return;const a=anchorFor(cell);if(!a)return;openChat(a,labelFor(cell),cell);});
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeChat();});
+document.addEventListener('click',e=>{const pop=document.getElementById('chatpop');if(pop.style.display==='block'&&!pop.contains(e.target)&&!e.target.closest('[data-col]'))closeChat();});
 
 function esc(s){return String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
 
@@ -383,31 +471,35 @@ function render(){
     }
     if(!e.company||!e.name)continue;
     const r=rows[key(e.company,e.name)]=rows[key(e.company,e.name)]||{company:e.company,name:e.name};
-    if(e.tier!==undefined)r.tier=e.tier;
-    if(a==='phone_found'){r.phone=e.phone;r.phoneState='found'}
+    // before/after: when a value changes across iterations, remember the prior one
+    if(e.tier!==undefined){if(r.tier!==undefined&&r.tier!==e.tier)r.tierPrev=r.tier;r.tier=e.tier;}
+    if(a==='phone_found'){if(r.phone&&r.phone!==e.phone)r.phonePrev=r.phone;r.phone=e.phone;r.phoneState='found'}
     if(a==='phone_not_found'){r.phoneState='none'}
-    if(a==='email_found'){r.email=e.email;r.emailSource=e.source;r.emailState='found'}
+    if(a==='email_found'){if(r.email&&r.email!==e.email)r.emailPrev=r.email;r.email=e.email;r.emailSource=e.source;r.emailState='found'}
     if(a==='email_not_found'){r.emailState='none'}
-    if(e.crm_id)r.hs=e.crm_id;
+    if(e.crm_id){if(r.hs&&r.hs!==e.crm_id)r.hsPrev=r.hs;r.hs=e.crm_id;}
   }
   const list=Object.values(rows).sort((a,b)=>(a.company||'').localeCompare(b.company||'')||(a.tier??9)-(b.tier??9));
-  const pill=(state,val,extra)=>{
-    if(val)return `<span class="pill ok">${esc(val)}</span>${extra?` <small style="color:var(--dim)">${esc(extra)}</small>`:''}`;
+  const wasTag=p=>p?` <small style="color:var(--warn)">· was ${esc(p)}</small>`:'';
+  const pill=(state,val,extra,prev)=>{
+    if(val)return `<span class="pill ok">${esc(val)}</span>${extra?` <small style="color:var(--dim)">${esc(extra)}</small>`:''}${wasTag(prev)}`;
     if(state==='none')return '<span class="pill warn">not found</span>';
     if(state)return `<span class="pill dim">${esc(state)}</span>`;
     return '<span class="pill dim">—</span>';
   };
   const tierLabel={1:'Tier 1',2:'Tier 2',3:'Tier 3',4:'Tier 4',5:'Tier 5'};
   content.innerHTML=list.length
-    ?`<table><tr><th>Company</th><th>Person</th><th>Tier</th><th>Phone</th><th>Email</th><th>CRM id</th></tr>`+
+    ?`<table><tr><th data-col="Company">Company</th><th data-col="Person">Person</th><th data-col="Tier">Tier</th><th data-col="Phone">Phone</th><th data-col="Email">Email</th><th data-col="CRM id">CRM id</th></tr>`+
       list.map((r,i)=>{
         const first=i===0||list[i-1].company!==r.company;
-        return `<tr><td>${first?`<b>${esc(r.company)}</b>`:''}</td><td>${esc(r.name)}</td>`+
-        `<td><small>${tierLabel[r.tier]??''}</small></td>`+
-        `<td>${pill(r.phoneState,r.phone)}</td><td>${pill(r.emailState,r.email,r.emailSource)}</td>`+
-        `<td>${r.hs?`<span class="pill ok">${esc(r.hs)}</span>`:'<span class="pill dim">—</span>'}</td></tr>`;
+        return `<tr data-key="${esc(key(r.company,r.name))}" data-co="${esc(r.company||'')}" data-name="${esc(r.name||'')}">`+
+        `<td data-col="Company">${first?`<b>${esc(r.company)}</b>`:''}</td><td data-col="Person">${esc(r.name)}</td>`+
+        `<td data-col="Tier"><small>${tierLabel[r.tier]??''}${r.tierPrev?` <span style="color:var(--warn)">· was ${tierLabel[r.tierPrev]??r.tierPrev}</span>`:''}</small></td>`+
+        `<td data-col="Phone">${pill(r.phoneState,r.phone,undefined,r.phonePrev)}</td><td data-col="Email">${pill(r.emailState,r.email,r.emailSource,r.emailPrev)}</td>`+
+        `<td data-col="CRM id">${r.hs?`<span class="pill ok">${esc(r.hs)}</span>`+wasTag(r.hsPrev):'<span class="pill dim">—</span>'}</td></tr>`;
       }).join('')+'</table>'
     :'<div class=empty>No per-person results yet — see the Run info tab for progress.</div>';
+  decorateChat();
 }
 
 function renderStats(){
@@ -454,6 +546,7 @@ async function poll(){
       offsets=res.offsets;
       if(res.events.length){all.push(...res.events);render();}
     }
+    await loadChat();
   }catch(err){/* server restarting — retry */}
   setTimeout(poll,2000);
 }
@@ -490,6 +583,32 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_POST(self):
+        from urllib.parse import urlparse
+        u = urlparse(self.path)
+        if u.path == '/api/chat':
+            length = int(self.headers.get('Content-Length') or 0)
+            raw = self.rfile.read(length) if length else b''
+            try:
+                data = json.loads(raw or b'{}')
+            except json.JSONDecodeError:
+                data = {}
+            text = (data.get('text') or '').strip()[:2000]
+            run = (data.get('run') or '')[:200]
+            anchor = (data.get('anchor') or '')[:300]
+            if text and run and anchor:
+                os.makedirs(os.path.dirname(CHAT_FILE), exist_ok=True)
+                rec = {'ts': time.strftime('%Y-%m-%dT%H:%M:%S'), 'run': run,
+                       'anchor': anchor, 'author': 'user', 'text': text}
+                with open(CHAT_FILE, 'a', encoding='utf-8') as fh:
+                    fh.write(json.dumps(rec, ensure_ascii=False) + '\n')
+                self._json({'ok': True})
+            else:
+                self._json({'ok': False, 'error': 'run, anchor, text required'})
+        else:
+            self.send_response(404)
+            self.end_headers()
+
     def do_GET(self):
         from urllib.parse import urlparse, parse_qs
         u = urlparse(self.path)
@@ -505,6 +624,23 @@ class Handler(BaseHTTPRequestHandler):
             self._json(list_runs())
         elif u.path == '/api/locks':
             self._json(locks())
+        elif u.path == '/api/chat':
+            q = parse_qs(u.query)
+            run = (q.get('run') or [''])[0]
+            msgs = []
+            if os.path.isfile(CHAT_FILE):
+                with open(CHAT_FILE, encoding='utf-8') as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            m = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if not run or m.get('run') == run:
+                            msgs.append(m)
+            self._json(msgs)
         elif u.path == '/api/explain':
             # Read EXPLAIN.md fresh every time (statement of intent must be current).
             found, md = False, ''

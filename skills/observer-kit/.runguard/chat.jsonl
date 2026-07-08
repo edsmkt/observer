@@ -1,0 +1,3 @@
+{"ts": "2026-07-08T14:06:58", "run": "runguard:2026-07-08-000000-sample-ledger.jsonl", "anchor": "cell:acme-widgets.de|Ben Bauer|Phone", "author": "user", "text": "This number looks like a mobile — can you prefer the office landline for Ben?"}
+{"ts": "2026-07-08T14:07:12", "run": "runguard:2026-07-08-000000-sample-ledger.jsonl", "anchor": "cell:acme-widgets.de|Ben Bauer|Phone", "author": "agent", "text": "Got it \u2014 I'll deprioritize mobiles for Ben and re-run just his lookup preferring landline."}
+{"ts": "2026-07-08T14:34:41", "run": "runguard:2026-07-08-000000-sample-ledger.jsonl", "anchor": "cell:acme-widgets.de|Ben Bauer|Phone", "author": "agent", "text": "Done \u2014 swapped Ben to the office landline.", "resolved": true}

@@ -142,3 +142,73 @@ def throttle(resource: str, per_second: float) -> None:
     wait = grant - time.time()
     if wait > 0:
         time.sleep(wait)
+
+
+# ---- inline-dashboard chat (the run_dashboard.py "chat in the cells" inbox) ----
+# The dashboard WRITES operator notes here (anchored to a column/cell); the agent
+# PULLS them to receive feedback and replies with post_chat(author='agent').
+# Delivery is a pull, never a push: read at the start of your next turn, or poll
+# between rounds of a long run for a stop/adjust signal. Same _STATE_DIR as the
+# dashboard's SOURCES['runguard'] — all coordinating processes must share it.
+def _chat_path() -> str:
+    return os.path.join(_STATE_DIR, 'chat.jsonl')
+
+
+def read_chat(run_id: str | None = None, after_ts: str | None = None,
+              author: str | None = None) -> list:
+    """Operator notes left in the dashboard, newest last. Filter to one run,
+    to messages after a timestamp (to see only what's new since you last read),
+    and/or by author ('user' for operator notes you haven't answered yet)."""
+    path = _chat_path()
+    out = []
+    if not os.path.exists(path):
+        return out
+    with open(path, encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                m = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if run_id and m.get('run') != run_id:
+                continue
+            if after_ts and (m.get('ts') or '') <= after_ts:
+                continue
+            if author and m.get('author') != author:
+                continue
+            out.append(m)
+    return out
+
+
+def post_chat(run_id: str, anchor: str, text: str, author: str = 'agent',
+              resolved: bool = False) -> None:
+    """Reply into the dashboard thread (shows under the same column/cell). The
+    agent uses this to answer an operator note; `anchor` must match the note's.
+    Pass resolved=True when the note is handled — the cell's badge flips to a ✓."""
+    os.makedirs(_STATE_DIR, exist_ok=True)
+    rec = {'ts': time.strftime('%Y-%m-%dT%H:%M:%S'), 'run': run_id,
+           'anchor': anchor, 'author': author, 'text': text, 'resolved': bool(resolved)}
+    with open(_chat_path(), 'a', encoding='utf-8') as f:
+        f.write(json.dumps(rec, ensure_ascii=False, default=str) + '\n')
+
+
+def wait_for_feedback(run_id: str, timeout: float = 600, poll: float = 2.0,
+                      since_ts: str | None = None) -> list:
+    """Block until the operator leaves at least one new note for this run in the
+    dashboard, or until timeout. Returns the new user messages (empty on timeout).
+
+    This is the AXI-style review gate: run a SMALL SAMPLE, call this so the operator
+    can inspect the sample in the dashboard and leave notes on cells/columns, then
+    adapt and run the full list. `since_ts` defaults to now, so only notes left
+    after the call count."""
+    if since_ts is None:
+        since_ts = time.strftime('%Y-%m-%dT%H:%M:%S')
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        msgs = read_chat(run_id, after_ts=since_ts, author='user')
+        if msgs:
+            return msgs
+        time.sleep(poll)
+    return []

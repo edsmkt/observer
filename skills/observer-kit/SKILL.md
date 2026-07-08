@@ -7,7 +7,9 @@ description: >-
   writes. Adds crash-safe run locks (a second accidental run refuses to start,
   so nothing double-spends or corrupts data), cross-process rate limiting, an
   append-only audit ledger, a plain-English EXPLAIN.md the operator can verify,
-  and a read-only web view of what each run is doing in real time.
+  and a read-only web view of what each run is doing in real time. Run a small
+  sample first and let the operator steer via inline chat on the results before
+  the full run.
 metadata:
   author: edsmkt
   tags: [batch, enrichment, safety, locks, rate-limiting, observability, credits]
@@ -58,6 +60,34 @@ need into the target project (vendor them; don't import from the skill dir):
    the run is doing the right thing and stop it if not. Regenerate it whenever
    the pipeline changes — stale intent is worse than none. Use the bundled
    `EXPLAIN.md` as the template.
+
+## The sample-first loop (MANDATORY)
+
+Never run a full list first. Always:
+1. Run a small **sample** (e.g. 5 items) with the guards on, logging to the ledger.
+2. Call `runguard.wait_for_feedback(run_id)` — it **blocks** so the operator can
+   review the sample in the dashboard and leave notes on specific columns/cells.
+3. Read the notes, adjust the script/workflow, and run another sample if needed.
+   Code changes always mean a **new run** — a running process can't change its own
+   code — so re-running is how an adjustment takes effect.
+4. Only once the sample looks right, run the full list. The full run polls
+   `read_chat()` between rounds for a **STOP** signal (the one thing it can act on
+   live); everything else is iterated on the sample, not mid-run.
+
+Iterations show as **before/after** in the dashboard — a changed cell renders
+"· was X" — so the operator sees exactly what your adjustment changed.
+
+## Receiving operator feedback (inline chat)
+
+The operator leaves notes anchored to a column or cell in the dashboard. They
+arrive as a file-drop inbox you **pull** (there is no push into a running agent):
+- `runguard.read_chat(run_id, author='user')` — notes waiting for you.
+- `runguard.wait_for_feedback(run_id)` — block until new notes arrive (use after a sample).
+- `runguard.post_chat(run_id, anchor, text)` — reply; shows in that cell's thread.
+- `runguard.post_chat(run_id, anchor, text, resolved=True)` — mark a note handled;
+  the cell's badge flips to a green ✓.
+
+Address every note and resolve it, so the operator watches the loop close.
 
 ## Safety rules (do not skip)
 

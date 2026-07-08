@@ -32,6 +32,14 @@ no dependencies:
 
 ![How it works view](assets/how-it-works.png)
 
+**Collaborate on a sample** — click any column header or cell to chat with the
+agent, anchored to that exact spot. The intended loop: the agent runs a small
+sample, you leave notes on what to change, it replies and marks them ✓, and the
+next run shows **before/after** inline (`· was X`) so you see what changed —
+before committing the full (expensive) run.
+
+![Inline chat anchored to a cell](assets/collaborate.png)
+
 ## Install
 
 Into your user scope (available in every project you open):
