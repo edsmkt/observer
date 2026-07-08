@@ -24,6 +24,11 @@ mutate shared state (CRM, database). Give this folder to a project agent and say
    - **How it works** — renders `EXPLAIN.md`: a plain-English + ASCII statement
      of intent the operator reads to verify the run before it spends.
 
+   Table interactions: wide schemas scroll left/right with the **first column
+   frozen**; **drag a header's right edge** to resize a column (persists per
+   browser); cells stay a uniform single-line height (long text truncates with
+   an ellipsis), and **double-click a cell** to read its full content in a popup.
+
 3. **`example_worker.py`** — a minimal worker script showing the full pattern:
    lock, plan, spend ceiling, per-round processing, ledger events, release.
 

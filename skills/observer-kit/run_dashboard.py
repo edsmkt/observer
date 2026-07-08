@@ -202,10 +202,24 @@ h3{margin:10px 0 8px;font-size:11px;color:var(--dim);text-transform:uppercase;le
 .card h4{margin:0 0 6px;font-size:14.5px}
 .card .row{padding:3px 0;color:var(--txt)}
 .card .row small{color:var(--dim)}
-table{width:100%;border-collapse:collapse;background:var(--card);border-radius:10px;overflow:hidden}
-th{position:sticky;top:0;background:#242e3a;text-align:left;padding:9px 12px;font-size:11.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em}
-td{padding:8px 12px;border-top:1px solid var(--line);vertical-align:top}
+.tablewrap{overflow-x:auto;border-radius:10px}
+table{min-width:100%;table-layout:fixed;border-collapse:separate;border-spacing:0;background:var(--card)}
+th{position:sticky;top:0;z-index:2;background:#242e3a;text-align:left;padding:9px 12px;font-size:11.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+td{padding:8px 12px;border-top:1px solid var(--line);vertical-align:top;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 tr:hover td{background:#232c36}
+/* freeze the first column so it stays visible when scrolling a wide table right */
+th:first-child{left:0;z-index:3}
+td:first-child{position:sticky;left:0;z-index:1;background:var(--card)}
+tr:hover td:first-child{background:#232c36}
+/* drag handle on the right edge of each header cell to resize its column */
+.rz{position:absolute;top:0;right:0;width:7px;height:100%;cursor:col-resize}
+.rz:hover{background:#3a4a5e}
+/* double-click a cell → full content (for long descriptions) */
+#cellmodal{display:none;position:fixed;inset:0;z-index:100;background:rgba(0,0,0,.55);align-items:center;justify-content:center}
+#cellmodal.show{display:flex}
+#cellmodalbox{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;max-width:min(680px,90vw);max-height:80vh;overflow:auto}
+#cellmodalhead{color:var(--info);font-size:12.5px;margin-bottom:8px}
+#cellmodalbody{white-space:pre-wrap;word-break:break-word;font-size:14px;line-height:1.55}
 .pill{display:inline-block;padding:1px 9px;border-radius:99px;font-size:12px}
 .pill.ok{background:#1d3a2b;color:var(--ok)}.pill.warn{background:#3a331d;color:var(--warn)}
 .pill.err{background:#3a221d;color:var(--err)}.pill.dim{background:#242e39;color:var(--dim)}
@@ -263,8 +277,17 @@ th[data-col]:hover,td[data-col]:hover{outline:1px solid #34506e;outline-offset:-
     <button class="chatbtn primary" onclick="sendChat()">Send to agent</button>
   </div>
 </div>
+<div id=cellmodal onclick="if(event.target.id==='cellmodal')closeCellModal()">
+  <div id=cellmodalbox>
+    <div id=cellmodalhead></div>
+    <div id=cellmodalbody></div>
+    <div style="text-align:right;margin-top:10px"><button class=chatbtn onclick="closeCellModal()">Close</button></div>
+  </div>
+</div>
 <script>
-let sel=null, offsets={}, all=[], view='records', chatByAnchor={}, chatOpenAnchor=null;
+let sel=null, offsets={}, all=[], view='records', chatByAnchor={}, chatOpenAnchor=null, colW={};
+const COLW_DEFAULT={Company:190,Person:150,Tier:80,Phone:170,Email:230,'CRM id':120};
+try{colW=JSON.parse(localStorage.getItem('observer_colw')||'{}')}catch(e){}
 const content=document.getElementById('content');
 let autoscroll=true;
 content.addEventListener('scroll',()=>{autoscroll=content.scrollTop+content.clientHeight>content.scrollHeight-60});
@@ -332,7 +355,41 @@ function decorateChat(){
     cell.appendChild(b);
   });
 }
-content.addEventListener('click',ev=>{const cell=ev.target.closest('[data-col]');if(!cell)return;const a=anchorFor(cell);if(!a)return;openChat(a,labelFor(cell),cell);});
+// single click = chat · double click = expand full cell · drag header edge = resize column
+let clickTimer=null;
+content.addEventListener('click',ev=>{
+  if(ev.target.closest('.rz'))return;
+  const cell=ev.target.closest('[data-col]'); if(!cell)return;
+  const a=anchorFor(cell); if(!a)return;
+  clearTimeout(clickTimer);
+  clickTimer=setTimeout(()=>openChat(a,labelFor(cell),cell),220);
+});
+content.addEventListener('dblclick',ev=>{
+  const cell=ev.target.closest('td[data-col]'); if(!cell)return;
+  clearTimeout(clickTimer);
+  openCellModal(cell);
+});
+let rz=null;
+content.addEventListener('mousedown',ev=>{
+  const h=ev.target.closest('.rz'); if(!h)return;
+  ev.preventDefault(); ev.stopPropagation();
+  const th=h.closest('th'); rz={th,col:th.dataset.col,x:ev.clientX,w:th.offsetWidth};
+});
+document.addEventListener('mousemove',ev=>{
+  if(!rz)return;
+  const w=Math.max(56, rz.w+ev.clientX-rz.x);
+  rz.th.style.width=w+'px'; colW[rz.col]=w;
+});
+document.addEventListener('mouseup',()=>{ if(rz){localStorage.setItem('observer_colw',JSON.stringify(colW)); rz=null;} });
+function openCellModal(cell){
+  const clone=cell.cloneNode(true); const dot=clone.querySelector('.chatdot'); if(dot)dot.remove();
+  const tr=cell.closest('tr'); const who=tr?(tr.dataset.name||tr.dataset.co||''):'';
+  document.getElementById('cellmodalhead').textContent=(who?who+' · ':'')+cell.dataset.col;
+  document.getElementById('cellmodalbody').textContent=(clone.textContent||'').trim()||'(empty)';
+  document.getElementById('cellmodal').classList.add('show');
+}
+function closeCellModal(){document.getElementById('cellmodal').classList.remove('show');}
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeCellModal();});
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeChat();});
 document.addEventListener('click',e=>{const pop=document.getElementById('chatpop');if(pop.style.display==='block'&&!pop.contains(e.target)&&!e.target.closest('[data-col]'))closeChat();});
 
@@ -495,7 +552,7 @@ function render(){
   };
   const tierLabel={1:'Tier 1',2:'Tier 2',3:'Tier 3',4:'Tier 4',5:'Tier 5'};
   content.innerHTML=list.length
-    ?`<table><tr><th data-col="Company">Company</th><th data-col="Person">Person</th><th data-col="Tier">Tier</th><th data-col="Phone">Phone</th><th data-col="Email">Email</th><th data-col="CRM id">CRM id</th></tr>`+
+    ?`<div class=tablewrap><table><tr>${['Company','Person','Tier','Phone','Email','CRM id'].map(c=>`<th data-col="${c}" style="width:${colW[c]??COLW_DEFAULT[c]??160}px">${c}<span class=rz></span></th>`).join('')}</tr>`+
       list.map((r,i)=>{
         const first=i===0||list[i-1].company!==r.company;
         return `<tr data-key="${esc(key(r.company,r.name))}" data-co="${esc(r.company||'')}" data-name="${esc(r.name||'')}">`+
@@ -503,7 +560,7 @@ function render(){
         `<td data-col="Tier"><small>${tierLabel[r.tier]??''}${r.tierPrev?` <span style="color:var(--warn)">· was ${tierLabel[r.tierPrev]??r.tierPrev}</span>`:''}</small></td>`+
         `<td data-col="Phone">${pill(r.phoneState,r.phone,undefined,r.phonePrev)}</td><td data-col="Email">${pill(r.emailState,r.email,r.emailSource,r.emailPrev)}</td>`+
         `<td data-col="CRM id">${r.hs?`<span class="pill ok">${esc(r.hs)}</span>`+wasTag(r.hsPrev):'<span class="pill dim">—</span>'}</td></tr>`;
-      }).join('')+'</table>'
+      }).join('')+'</table></div>'
     :'<div class=empty>No per-person results yet — see the Run info tab for progress.</div>';
   decorateChat();
 }
