@@ -40,6 +40,21 @@ they're in place first.
 - **`run_dashboard.py` is a standalone viewer** → **do NOT vendor it.** Run one
   instance, pointed at whatever project's ledger dir. One observer serves every project.
 
+**First, agree the schema with the operator — propose, don't interrogate.** The
+dashboard shows *exactly* the fields you log, so decide them together before wiring.
+Read what the script does, **propose a sensible default**, and let them accept, edit,
+add, or drop:
+
+> "Here's what I'd surface — one row per **company**: `source · condition · supabase ·
+> hubspot · status`, plus a **contacts** table (`name · title · tier · email`). Accept,
+> or want columns added/removed?"
+
+In the proposal, cover: **which entities/steps** (each becomes a `table` / sub-tab);
+**where each row was pulled from and pushed to** (Supabase / HubSpot / Cloudflare /
+CSV / webhook…), plus conditions and a status (each a column); and **any key fields**
+they'll want to eyeball. Whatever they land on *is* your `record` schema — log those
+field names verbatim. Re-propose whenever the pipeline changes.
+
 Then add three things to the script that already exists:
 
 **1. Lock it** — one line before the first spend/write:
@@ -50,14 +65,17 @@ acquire_lock('my-scope')   # scope = the dataset's identity, e.g. f'enrich-{tabl
 A second run on the same scope hard-refuses (SystemExit) while the first is
 alive — nothing double-spends. Different scopes still run in parallel.
 
-**2. Ledger it** — bracket the run, and log one `record` per unit of work:
+**2. Ledger it** — bracket the run, and log one `record` per unit of work, with the
+fields the operator asked for:
 ```python
 ledger('my-scope', 'run_started', description='what this run does')
 for item in work:
     ...whatever the script already does...
+    # field names below = exactly what they said they want to see
     ledger('my-scope', 'record', table='companies', key=item.id,
-           company=item.domain, found=n, source='blitz', ok=True)
-ledger('my-scope', 'run_finished', processed=len(work))
+           company=item.domain, source='northdata',
+           condition='met', supabase='inserted', hubspot='pushed', status='done')
+ledger('my-scope', 'run_finished', processed=len(work))  # numeric fields become top-bar totals
 ```
 The ledger is BOTH the audit trail and the dashboard's feed. `record` events are
 the general path — the dashboard builds a table from whatever fields you log, no
