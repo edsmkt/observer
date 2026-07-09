@@ -200,6 +200,11 @@ body.noside #sideHead{justify-content:center}
 #stats{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px}
 .chip{background:var(--card);border-radius:8px;padding:6px 14px;text-align:center}
 .chip b{font-size:19px;display:block}
+.activity{flex-basis:100%;display:grid;grid-template-columns:1.15fr 1fr 1fr .8fr;gap:10px;background:#12181f;border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+.activity .k{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.06em;display:block;line-height:1.2}
+.activity .v{font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block}
+.activity.live{border-color:#28513d}.activity.stale{border-color:#5b4b22}.activity.failed{border-color:#5b2c28}.activity.done{border-color:#29455e}
+@media(max-width:900px){.activity{grid-template-columns:1fr 1fr}.activity .v{white-space:normal}}
 #content{flex:1;overflow-y:auto;padding:14px 20px}
 h3{margin:10px 0 8px;font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.08em}
 .run{padding:7px 10px;border-radius:7px;cursor:pointer;margin-bottom:4px;font-size:12.5px}
@@ -272,6 +277,7 @@ th[data-col]:hover,td[data-col]:hover{outline:1px solid #34506e;outline-offset:-
   <div id=topbar>
     <div class=tabs>
       <div class="tab sel" id=tabRecords onclick="view='records';render()">Data</div>
+      <div class=tab id=tabAttention onclick="view='attention';render()">Attention</div>
       <div class=tab id=tabFeed onclick="view='feed';render()">Timeline</div>
       <div class=tab id=tabInfo onclick="view='info';render()">Run info</div>
       <div class=tab id=tabExplain onclick="view='explain';render()">How it works</div>
@@ -300,6 +306,7 @@ th[data-col]:hover,td[data-col]:hover{outline:1px solid #34506e;outline-offset:-
 </div>
 <script>
 let sel=null, offsets={}, all=[], view='records', chatByAnchor={}, chatOpenAnchor=null, colW={}, recTab=null;
+const ATTENTION_RE=/(fail|error|refus|reject|timeout|exception|invalid|denied|blocked|stuck|\b[45]\d\d\b)/i;
 function setRecTab(t){recTab=t;render();}
 const COLW_DEFAULT={Company:190,Person:150,Tier:80,Phone:170,Email:230,'CRM id':120};
 try{colW=JSON.parse(localStorage.getItem('observer_colw')||'{}')}catch(e){}
@@ -424,6 +431,47 @@ function outcomeClass(v){
   if(/(done|ok|success|inserted|upserted|pushed|written|created|updated|added|appended|found|matched|sent|complete|synced|✓|^yes$|^true$)/.test(s))return 'ok';
   return '';
 }
+function parseTs(ts){
+  if(!ts)return 0;
+  const t=Date.parse(String(ts).replace(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})$/,'$1Z'));
+  return Number.isFinite(t)?t:0;
+}
+function relAge(ts){
+  const t=parseTs(ts); if(!t)return 'unknown';
+  const s=Math.max(0,Math.round((Date.now()-t)/1000));
+  if(s<60)return s+'s ago';
+  const m=Math.floor(s/60); if(m<60)return m+'m '+(s%60)+'s ago';
+  const h=Math.floor(m/60); return h+'h '+(m%60)+'m ago';
+}
+function isAttentionRecord(r){
+  if(r.error)return true;
+  const status=String(r.status??r.outcome??r.result??'');
+  if(ATTENTION_RE.test(status))return true;
+  for(const v of Object.values(r)){
+    if(typeof v==='string'&&ATTENTION_RE.test(v))return true;
+  }
+  return false;
+}
+function recordGroups(){
+  const SKIP=new Set(['ts','event','action','_file','key','table']);
+  const groups={}, gorder=[];
+  for(const e of all.filter(e=>(e.event||e.action)==='record')){
+    const t=e.table||'records';
+    if(!groups[t]){groups[t]={rows:{},order:[],cols:[]};gorder.push(t);}
+    const g=groups[t];
+    const k=String(e.key ?? e.company ?? e.name ?? JSON.stringify(e));
+    let r=g.rows[k];
+    if(!r){r=g.rows[k]={__prev:{}};g.order.push(k);}
+    for(const f of Object.keys(e)){
+      if(SKIP.has(f))continue;
+      if(!g.cols.includes(f))g.cols.push(f);
+      const v=e[f];
+      if(r[f]!==undefined&&r[f]!==v)r.__prev[f]=r[f];
+      r[f]=v;
+    }
+  }
+  return {groups,gorder};
+}
 // A column is "categorical" (worth coloring + counting) if it repeats values and
 // has few distinct ones — that targets status/source/sink columns and skips names/ids.
 function catColumns(rows, cols){
@@ -511,7 +559,7 @@ async function loadExplain(){
 }
 
 function render(){
-  for(const [v,id] of Object.entries({records:'tabRecords',feed:'tabFeed',info:'tabInfo',explain:'tabExplain'}))
+  for(const [v,id] of Object.entries({records:'tabRecords',attention:'tabAttention',feed:'tabFeed',info:'tabInfo',explain:'tabExplain'}))
     document.getElementById(id).classList.toggle('sel',view===v);
   const tech=document.getElementById('tech').checked;
   const mapped=all.map(e=>({e,h:humanize(e)}));
@@ -557,8 +605,12 @@ function render(){
 
   const hs=mapped.filter(x=>tech||!x.h.technical);
   if(!hs.length){content.innerHTML='<div class=empty>No events yet — they appear here within ~2s of happening.</div>';return}
-  if(view==='feed'){
-    content.innerHTML=hs.map(({e,h})=>`<div class=line><span class=when>${(e.ts||'').slice(11,19)}</span><span>${h.icon}</span><span class=${h.cls}>${h.text}${h.detail?`<br><small style="color:var(--dim)">${esc(h.detail)}</small>`:''}</span></div>`).join('');
+  if(view==='feed'||(view==='attention'&&!all.some(e=>(e.event||e.action)==='record'))){
+    const shown=view==='attention'
+      ? hs.filter(({e,h})=>h.cls==='err'||ATTENTION_RE.test(JSON.stringify(e)))
+      : hs;
+    if(!shown.length){content.innerHTML='<div class=empty>No attention items yet.</div>';return}
+    content.innerHTML=shown.map(({e,h})=>`<div class=line><span class=when>${(e.ts||'').slice(11,19)}</span><span>${h.icon}</span><span class=${h.cls}>${h.text}${h.detail?`<br><small style="color:var(--dim)">${esc(h.detail)}</small>`:''}</span></div>`).join('');
     if(autoscroll)content.scrollTop=content.scrollHeight;
     return;
   }
@@ -569,25 +621,9 @@ function render(){
   // when a run has no `record` events.
   const recEvents=all.filter(e=>(e.event||e.action)==='record');
   if(recEvents.length){
-    const SKIP=new Set(['ts','event','action','_file','key','table']);
     // group records by their `table` field: a multi-step workflow emits different
     // shapes at each step (companies → contacts → enriched…), each its own table.
-    const groups={}, gorder=[];
-    for(const e of recEvents){
-      const t=e.table||'records';
-      if(!groups[t]){groups[t]={rows:{},order:[],cols:[]};gorder.push(t);}
-      const g=groups[t];
-      const k=String(e.key ?? e.company ?? e.name ?? JSON.stringify(e));
-      let r=g.rows[k];
-      if(!r){r=g.rows[k]={__prev:{}};g.order.push(k);}
-      for(const f of Object.keys(e)){
-        if(SKIP.has(f))continue;
-        if(!g.cols.includes(f))g.cols.push(f);
-        const v=e[f];
-        if(r[f]!==undefined&&r[f]!==v)r.__prev[f]=r[f];
-        r[f]=v;
-      }
-    }
+    const {groups,gorder}=recordGroups();
     const gwas=p=>p!==undefined?` <small style="color:var(--warn)">· was ${esc(fmt(p))}</small>`:'';
     // one SUB-TAB per table (companies / contacts / …) instead of stacking them —
     // a workflow step's output gets its own tab, not buried under the previous step's rows.
@@ -596,6 +632,7 @@ function render(){
     if(gorder.length>1)
       html+='<div class=subtabs>'+gorder.map(t=>`<span class="subtab ${t===recTab?'sel':''}" onclick="setRecTab('${esc(t)}')">${esc(t)} <small>· ${groups[t].order.length}</small></span>`).join('')+'</div>';
     const g=groups[recTab], cols=g.cols;
+    const rowKeys=view==='attention' ? g.order.filter(k=>isAttentionRecord(g.rows[k])) : g.order;
     // categorical columns (status / source / sink / condition …) render as colored
     // outcome pills; free-text/id columns stay plain. Fully data-driven.
     const cats=catColumns(g.order.map(k=>g.rows[k]), cols);
@@ -611,8 +648,12 @@ function render(){
       if(sum<avail){const kk=avail/sum;cols.forEach(c=>gbase[c]=Math.round(gbase[c]*kk));}
     }
     const gtot=cols.reduce((s,c)=>s+gbase[c],0);
+    if(view==='attention'&&!rowKeys.length){
+      content.innerHTML='<div class=empty>No records need attention right now.</div>';
+      return;
+    }
     html+=`<div class=tablewrap><table style="width:${gtot}px"><tr>${cols.map(c=>`<th data-col="${esc(recTab+'::'+c)}" style="width:${gbase[c]}px">${esc(c)}<span class=rz></span></th>`).join('')}</tr>`+
-      g.order.map(k=>{const r=g.rows[k];
+      rowKeys.map(k=>{const r=g.rows[k];
         return `<tr data-key="${esc(recTab+'::'+k)}" data-co="${esc(k)}" data-name="${esc(k)}">`+
           cols.map(c=>`<td data-col="${esc(recTab+'::'+c)}">${gcell(c,r[c])}${gwas(r.__prev[c])}</td>`).join('')+`</tr>`;
       }).join('')+'</table></div>';
@@ -704,9 +745,25 @@ function renderStats(){
     if(/error|fail|timeout/i.test(a)||(e.status_code>=400))errors++;
   }
   const chips=[];
+  const flatRecords=[];
   const tables=Object.keys(recByTable);
   if(tables.length){
-    for(const t of tables) chips.push([t, Object.keys(recByTable[t]).length]);   // companies, people, …
+    for(const t of tables){
+      const rows=Object.values(recByTable[t]);
+      flatRecords.push(...rows.map(r=>({table:t,row:r})));
+      chips.push([t, rows.length]);   // companies, people, …
+    }
+    const statusCounts={running:0,done:0,failed:0,attention:0};
+    for(const {row} of flatRecords){
+      const st=String(row.status||'').toLowerCase();
+      if(st==='running'||st==='queued'||st==='pending')statusCounts.running++;
+      else if(st==='done'||st==='success'||st==='ok'||st==='complete')statusCounts.done++;
+      else if(ATTENTION_RE.test(st)||row.error)statusCounts.failed++;
+      if(isAttentionRecord(row))statusCounts.attention++;
+    }
+    if(statusCounts.running)chips.push(['running',statusCounts.running,'warn']);
+    if(statusCounts.done)chips.push(['done',statusCounts.done,'ok']);
+    if(statusCounts.attention)chips.push(['needs attention',statusCounts.attention,'err']);
     // plus the engineer's own headline totals from run_finished (numeric fields only) —
     // e.g. emails_found, total_contacts. A few final numbers, not a per-value breakdown;
     // the colored cells carry the "what landed where" detail.
@@ -724,9 +781,53 @@ function renderStats(){
   for(const [p,c] of Object.entries(prov))          // one chip per provider
     chips.push([`${p} credits${c.left!==undefined?` · ${c.left} left`:''}`, c.used??0]);
   if(errors)chips.push(['errors',errors,'err']);
-  document.getElementById('stats').innerHTML=chips
+  document.getElementById('stats').innerHTML=activityStrip(flatRecords, errors)+chips
     .filter(([,v])=>v!==undefined)
     .map(([k,v,cls])=>`<span class=chip><b class="${cls||'ok'}">${v}</b><small>${esc(k)}</small></span>`).join('');
+}
+
+function activityStrip(flatRecords, errors){
+  if(!sel)return '';
+  const last=all[all.length-1]||{};
+  const started=[...all].find(e=>(e.event||e.action)==='run_started')||{};
+  const finished=[...all].reverse().find(e=>['run_finished','run_failed'].includes(e.event||e.action));
+  const dry=[...all].reverse().find(e=>e.dry_run!==undefined);
+  const dryText=dry ? (dry.dry_run?'Dry run · no writes':'Live run · writes enabled') : 'Write mode unknown';
+  const lastRecord=[...all].reverse().find(e=>(e.event||e.action)==='record')||{};
+  const currentRow=flatRecords.find(({row})=>String(row.status||'').toLowerCase()==='running');
+  const lastAge=relAge(last.ts);
+  const stale=!finished && parseTs(last.ts) && Date.now()-parseTs(last.ts)>60000;
+  let state='Waiting', cls='';
+  if(finished){
+    state=(finished.event||finished.action)==='run_failed'?'Failed':'Finished';
+    cls=state==='Failed'?'failed':'done';
+  }else if(stale){
+    state='Stale';
+    cls='stale';
+  }else if((selMeta&&selMeta.live)||currentRow){
+    state='Running';
+    cls='live';
+  }
+  const current=currentRow
+    ? `${currentRow.table}: ${currentRow.row.step||currentRow.row.key||currentRow.row.company||'record'}`
+    : lastRecord.step
+      ? `${lastRecord.table||'records'}: ${lastRecord.step}`
+      : humanize(last).text?.replace(/<[^>]+>/g,'') || 'No events yet';
+  const recordAttention=flatRecords.filter(({row})=>isAttentionRecord(row)).length;
+  const attention=flatRecords.length ? recordAttention : errors;
+  const progress=started.todo
+    ? `${flatRecords.filter(({row})=>String(row.status||'').toLowerCase()==='done').length} / ${started.todo}`
+    : flatRecords.length
+      ? `${flatRecords.length} records`
+      : all.length
+        ? `${all.length} events`
+        : 'No events yet';
+  return `<div class="activity ${cls}">
+    <div><span class=k>Status</span><span class="v ${cls==='failed'?'err':cls==='stale'?'warn':cls==='done'?'info':'ok'}">${state}</span></div>
+    <div><span class=k>Now</span><span class=v title="${esc(current)}">${esc(current)}</span></div>
+    <div><span class=k>Last event</span><span class=v>${esc(lastAge)}</span></div>
+    <div><span class=k>Mode / progress</span><span class=v>${esc(dryText)} · ${esc(progress)}${attention?` · ${attention} attention`:''}</span></div>
+  </div>`;
 }
 
 async function poll(){

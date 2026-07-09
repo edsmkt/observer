@@ -16,9 +16,10 @@ no dependencies:
   run id, lock, dry-run flag, visible step rows, counters, checkpoints, and
   `success()` / `fail()` lifecycle closure without inventing a run harness.
 - **A read-only web dashboard** (`http://localhost:8484`) — a live per-record
-  table, a plain-English timeline, a run-info tab, and a **"How it works"** tab
-  that renders a plain-English + ASCII `EXPLAIN.md` so a non-technical operator
-  can verify what a run is doing and stop it if it's wrong.
+  table, an at-a-glance activity strip, an Attention tab for failures/refusals,
+  a plain-English timeline, a run-info tab, and a **"How it works"** tab that
+  renders a plain-English + ASCII `EXPLAIN.md` so a non-technical operator can
+  verify what a run is doing and stop it if it's wrong.
 
 ## What it looks like
 

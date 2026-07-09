@@ -18,7 +18,9 @@ mutate shared state (CRM, database). Give this folder to a project agent and say
      checkpoints, and `success()` / `fail()` lifecycle closure.
 
 2. **`run_dashboard.py`** — a localhost website (default :8484), a SAMPLE that
-   tails the ledger files live. Read-only, zero-intrusion. Four tabs:
+   tails the ledger files live. Read-only, zero-intrusion. It shows an
+   at-a-glance activity strip, status chips, an Attention view for failures and
+   refusals, and four core tabs:
    - **Per company** — one row per (entity, item): status pills flip from
      "searching…" to the found value in real time.
    - **Timeline** — plain-English event feed; raw API calls behind a toggle.
