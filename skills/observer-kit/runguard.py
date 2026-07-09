@@ -4,11 +4,11 @@ Prevents a whole class of batch-job failures: a process nobody realizes is still
 running gets a second start, the two double-spend or corrupt shared state, and a
 panicked "cleanup" makes it worse. Two primitives:
 
-  acquire_lock(scope) — PID lockfile per resource scope. A second process on the
-                        same scope HARD-REFUSES while the first is alive (SystemExit).
-                        Same-PID re-acquire is a no-op (re-entrant). A lock whose
-                        PID is dead is stale and taken over silently — crash
-                        recovery is "just re-run", never "clean up".
+  acquire_lock(scope) — an OS advisory lock per resource scope. A second process
+                        on the same scope HARD-REFUSES while the first holds the
+                        lock (SystemExit). Same-PID re-acquire is a no-op
+                        (re-entrant). The OS releases a crashed process's lock,
+                        so recovery is "just re-run", never "clean up".
   ledger(scope, event, **fields) — append-only JSONL audit file per run:
                         what was attempted, what happened, what it cost.
                         Also the data feed for run_dashboard.py.
@@ -40,69 +40,125 @@ It still uses the same lock, ledger, dashboard feed, and state dir below.
 
 State dir: $RUNGUARD_STATE_DIR, else ./.runguard next to this file. All
 processes that should coordinate must use the SAME state dir.
-Override for deliberate parallel use of one scope (rare): RUNGUARD_DISABLE=1.
 """
 from __future__ import annotations
 
 import atexit
+import hashlib
 import fcntl
 import json
 import os
+import re
 import sys
 import time
 
 _STATE_DIR = os.environ.get('RUNGUARD_STATE_DIR') or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '.runguard')
 
-_held: dict[str, str] = {}   # name -> lockfile path (this process)
+_held: dict[str, tuple[str, int]] = {}  # name -> (persistent lockfile path, fd)
 _ledgers: dict[str, str] = {}
 _step_sequences: dict[str, int] = {}
+_SAFE_COMPONENT = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]*$')
+
+
+def _timestamp() -> str:
+    """UTC RFC 3339 timestamp understood consistently by every dashboard."""
+    return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+
+
+def _safe_component(value: object, fallback: str) -> str:
+    """Turn a human scope/session/resource into one safe, stable filename part."""
+    raw = str(value or '').strip()
+    if _SAFE_COMPONENT.fullmatch(raw):
+        return raw
+    slug = re.sub(r'[^A-Za-z0-9._-]+', '-', raw).strip('.-') or fallback
+    digest = hashlib.sha256(raw.encode('utf-8')).hexdigest()[:12]
+    return f'{slug[:80]}--{digest}'
+
+
+def _state_path(component: object, suffix: str, fallback: str) -> str:
+    os.makedirs(_STATE_DIR, exist_ok=True)
+    return os.path.join(_STATE_DIR, f'{_safe_component(component, fallback)}{suffix}')
+
+
+def source_scope(workflow: str, source: str) -> str:
+    """Stable lock scope from the real source identity, not a run nickname.
+
+    Pass a resolved CSV path, sheet ID, table ID, or another immutable source
+    identifier. Two invocations with the same source get the same scope; a
+    separate source gets a different scope and can run in parallel when it is
+    provably disjoint.
+    """
+    raw = str(source or '').strip()
+    if not raw:
+        raise ValueError('source must be a real source identity, not an empty label')
+    identity = os.path.realpath(raw) if os.path.exists(raw) else raw
+    digest = hashlib.sha256(identity.encode('utf-8')).hexdigest()[:16]
+    return f'{_safe_component(workflow, "workflow")}-source-{digest}'
 
 
 def _lockfile(name: str) -> str:
-    os.makedirs(_STATE_DIR, exist_ok=True)
-    return os.path.join(_STATE_DIR, f'{name}.lock')
+    return _state_path(name, '.lock', 'scope')
+
+
+def _read_lock(fd: int) -> dict:
+    os.lseek(fd, 0, os.SEEK_SET)
+    raw = os.read(fd, 8192).decode('utf-8', 'replace').strip()
+    try:
+        return json.loads(raw) if raw else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def _write_lock(fd: int, payload: dict) -> None:
+    raw = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.ftruncate(fd, 0)
+    os.write(fd, raw)
+    os.fsync(fd)
 
 
 def acquire_lock(name: str) -> None:
-    """Exclusive per-scope run lock. SystemExit(1) if another live process holds it."""
-    if os.environ.get('RUNGUARD_DISABLE') == '1':
-        return
+    """Exclusive per-scope advisory lock. Refuse while another process holds it."""
     if name in _held:
         return  # re-entrant within this process
     path = _lockfile(name)
-    if os.path.exists(path):
-        try:
-            with open(path, encoding='utf-8') as fh:
-                lock = json.load(fh)
-            pid = int(lock.get('pid', -1))
-            if pid != os.getpid():
-                os.kill(pid, 0)  # raises if dead
-                raise SystemExit(
-                    f"REFUSING TO START: another '{name}' run is live "
-                    f"(pid {pid}, started {lock.get('started')}).\n"
-                    f"If it is genuinely hung, stop it deliberately first: kill {pid}\n"
-                    f"Never start a parallel run to 'fix' a stuck one — that is exactly how "
-                    f"double-charges and corrupted state happen.")
-        except (ProcessLookupError, PermissionError, ValueError, json.JSONDecodeError):
-            pass  # stale (dead pid / unreadable) — take over; re-run is always safe
-    with open(path, 'w', encoding='utf-8') as fh:
-        json.dump({'pid': os.getpid(), 'started': time.strftime('%Y-%m-%dT%H:%M:%S'),
-                   'scope': name}, fh)
-    _held[name] = path
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock = _read_lock(fd)
+        os.close(fd)
+        pid = lock.get('pid', '?')
+        started = lock.get('started', '?')
+        raise SystemExit(
+            f"WARNING: '{name}' is already running "
+            f"(pid {pid}, started {started}).\n"
+            "Starting it again can cause duplicate provider charges, duplicate CRM or "
+            "sheet writes, and corrupted run history.\n"
+            f"Wait for it to finish, or deliberately stop it first: kill {pid}")
+    try:
+        _write_lock(fd, {'pid': os.getpid(), 'started': _timestamp(), 'scope': name})
+    except BaseException:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+        raise
+    _held[name] = (path, fd)
     atexit.register(release_lock, name)
 
 
 def release_lock(name: str) -> None:
-    path = _held.pop(name, None)
-    if path and os.path.exists(path):
-        try:
-            with open(path, encoding='utf-8') as fh:
-                lock = json.load(fh)
-            if int(lock.get('pid', -1)) == os.getpid():
-                os.remove(path)
-        except Exception:
-            pass
+    held = _held.pop(name, None)
+    if not held:
+        return
+    _path, fd = held
+    try:
+        # Keep the inode in place. Removing a flocked lockfile creates a race in
+        # which a second process can lock a new inode while this process holds old one.
+        _write_lock(fd, {'pid': 0, 'released': _timestamp(), 'scope': name})
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def ledger(scope: str, event: str, **fields) -> None:
@@ -119,12 +175,20 @@ def ledger(scope: str, event: str, **fields) -> None:
     if scope not in _ledgers:
         os.makedirs(_STATE_DIR, exist_ok=True)
         session = os.environ.get('RUNGUARD_SESSION')
-        name = f"{session}-{scope}.jsonl" if session else f"{scope}.jsonl"
+        scope_name = _safe_component(scope, 'scope')
+        session_name = _safe_component(session, 'session') if session else ''
+        name = f"{session_name}-{scope_name}.jsonl" if session_name else f"{scope_name}.jsonl"
         _ledgers[scope] = os.path.join(_STATE_DIR, name)
-    rec = {'ts': time.strftime('%Y-%m-%dT%H:%M:%S'), 'event': event}
+    rec = {'ts': _timestamp(), 'event': event}
     rec.update(fields)
-    with open(_ledgers[scope], 'a') as f:
-        f.write(json.dumps(rec, ensure_ascii=False, default=str) + '\n')
+    raw = (json.dumps(rec, ensure_ascii=False, default=str) + '\n').encode('utf-8')
+    fd = os.open(_ledgers[scope], os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        offset = 0
+        while offset < len(raw):
+            offset += os.write(fd, raw[offset:])
+    finally:
+        os.close(fd)
     if event == 'run_started':
         # Marker a harness hook can match to remind the agent to start this run's
         # watcher (so operator dashboard notes reach THIS session). Cheap + universal:
@@ -191,9 +255,13 @@ class ObservedRun:
 
     def __init__(self, name: str, lock_key: str | None = None,
                  dry_run: bool = False, description: str | None = None,
+                 source: str | None = None,
                  **fields):
         self.name = name
-        self.scope = lock_key or name
+        if source is not None and lock_key is not None:
+            raise ValueError('pass source= for a source-derived scope, not both source and lock_key')
+        self.source = source
+        self.scope = source_scope(name, source) if source is not None else (lock_key or name)
         self.lock_key = self.scope
         self.dry_run = bool(dry_run)
         self.description = description
@@ -203,10 +271,22 @@ class ObservedRun:
         acquire_lock(self.lock_key)
         started = dict(fields)
         started.update({'name': self.name, 'dry_run': self.dry_run})
+        if source is not None:
+            started['source'] = source
         if description:
             started['description'] = description
         ledger(self.scope, 'run_started', **started)
         self.run_id = current_run_id(self.scope)
+        atexit.register(self._abandon_if_open)
+
+    def _abandon_if_open(self) -> None:
+        if self.closed:
+            return
+        ledger(self.scope, 'run_abandoned', status='failed', dry_run=self.dry_run,
+               error='process exited before run.success() or run.fail()',
+               **self.counters)
+        release_lock(self.lock_key)
+        self.closed = True
 
     def step(self, name: str, **fields) -> ObservedStep:
         """Log one visible unit of work as a generic dashboard record."""
@@ -251,10 +331,11 @@ class ObservedRun:
 
 def start_observed_run(name: str, lock_key: str | None = None,
                        dry_run: bool = False, description: str | None = None,
+                       source: str | None = None,
                        **fields) -> ObservedRun:
     """Start the boring default contract: lock, run id, ledger, dry-run state."""
     return ObservedRun(name=name, lock_key=lock_key, dry_run=dry_run,
-                       description=description, **fields)
+                       description=description, source=source, **fields)
 
 
 
@@ -275,7 +356,7 @@ def throttle(resource: str, per_second: float) -> None:
     if per_second <= 0:
         return
     os.makedirs(_STATE_DIR, exist_ok=True)
-    path = os.path.join(_STATE_DIR, f'{resource}.throttle')
+    path = _state_path(resource, '.throttle', 'resource')
     interval = 1.0 / per_second
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
     try:
@@ -341,7 +422,7 @@ def post_chat(run_id: str, anchor: str, text: str, author: str = 'agent',
     agent uses this to answer an operator note; `anchor` must match the note's.
     Pass resolved=True when the note is handled — the cell's badge flips to a ✓."""
     os.makedirs(_STATE_DIR, exist_ok=True)
-    rec = {'ts': time.strftime('%Y-%m-%dT%H:%M:%S'), 'run': run_id,
+    rec = {'ts': _timestamp(), 'run': run_id,
            'anchor': anchor, 'author': author, 'text': text, 'resolved': bool(resolved)}
     with open(_chat_path(), 'a', encoding='utf-8') as f:
         f.write(json.dumps(rec, ensure_ascii=False, default=str) + '\n')
@@ -357,7 +438,7 @@ def wait_for_feedback(run_id: str, timeout: float = 600, poll: float = 2.0,
     adapt and run the full list. `since_ts` defaults to now, so only notes left
     after the call count."""
     if since_ts is None:
-        since_ts = time.strftime('%Y-%m-%dT%H:%M:%S')
+        since_ts = _timestamp()
     deadline = time.time() + timeout
     while time.time() < deadline:
         msgs = read_chat(run_id, after_ts=since_ts, author='user')

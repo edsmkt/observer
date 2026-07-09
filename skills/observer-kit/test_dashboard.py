@@ -65,5 +65,79 @@ with tempfile.TemporaryDirectory(prefix='rgdash-') as state:
     desc = next((r.get('desc') for r in runs if r.get('label') == 'large-run.jsonl'), '')
     ok("run list describes the latest attempt", desc == 'latest large dashboard check', desc)
 
+    # The newest attempt can be surrounded by large record batches, so sidebar
+    # metadata must not depend on a fixed head or tail window.
+    long_summary = os.path.join(state, 'long-summary.jsonl')
+    with open(long_summary, 'w', encoding='utf-8') as fh:
+        fh.write('{"event":"run_started","description":"old attempt"}\n')
+        for _ in range(30_000):
+            fh.write(json.dumps({'event': 'record', 'padding': 'x' * 100}) + '\n')
+        fh.write('{"event":"run_started","description":"latest attempt"}\n')
+        for _ in range(30_000):
+            fh.write(json.dumps({'event': 'record', 'padding': 'y' * 100}) + '\n')
+    ok("run list description finds a latest attempt in a large ledger",
+       dashboard._summary_event(long_summary).get('description') == 'latest attempt',
+       str(dashboard._summary_event(long_summary)))
+    with open(long_summary, 'a', encoding='utf-8') as fh:
+        fh.write('{"event":"run_started","description":"incremental attempt"}\n')
+    ok("run list summary incrementally sees a later attempt",
+       dashboard._summary_event(long_summary).get('description') == 'incremental attempt',
+       str(dashboard._summary_event(long_summary)))
+
+    # A terminal event must win over a recent file mtime. Otherwise every
+    # successful run is labelled "running" for ACTIVE_S seconds after it ends.
+    finished = os.path.join(state, 'finished-run.jsonl')
+    with open(finished, 'w', encoding='utf-8') as fh:
+        fh.write('{"ts":"2026-07-09T12:03:00Z","event":"run_started"}\n')
+        fh.write('{"ts":"2026-07-09T12:03:01Z","event":"run_finished"}\n')
+    runs = dashboard.list_runs()
+    finished_meta = next((r for r in runs if r.get('label') == 'finished-run.jsonl'), {})
+    ok("terminal run is not marked live just because it is recent", not finished_meta.get('live'),
+       str(finished_meta))
+
+    # A tail read while the writer has not yet emitted its newline must retry the
+    # line on the next poll instead of advancing into the middle of it.
+    partial = os.path.join(state, 'partial-run.jsonl')
+    first = b'{"ts":"2026-07-09T12:02:00Z","event":"record","table":"companies","key":"partial","company":"acme'
+    second = b'.example"}\n'
+    with open(partial, 'wb') as fh:
+        fh.write(first)
+    partial_events, partial_offsets = dashboard.read_events('runguard:partial-run.jsonl', {})
+    ok("partial JSONL line is deferred", not partial_events and list(partial_offsets.values())[0] == 0,
+       str(partial_offsets))
+    with open(partial, 'ab') as fh:
+        fh.write(second)
+    partial_events, partial_offsets = dashboard.read_events('runguard:partial-run.jsonl', partial_offsets)
+    ok("completed partial JSONL line arrives on next poll",
+       [e.get('key') for e in partial_events] == ['partial'], str(partial_events))
+
+    bad_offsets = [{ledger: 'not-a-number'}, {ledger: -1}, []]
+    for offset in bad_offsets:
+        offset_events, offset_result = dashboard.read_events('runguard:large-run.jsonl', offset)
+        ok(f"invalid dashboard offset is reset safely ({type(offset).__name__})",
+           bool(offset_events) and list(offset_result.values())[0] >= 0,
+           str(offset_result))
+
+    # History is a review surface, not a fixed-size recent window.
+    for n in range(45):
+        path = os.path.join(state, f'history-{n:02d}.jsonl')
+        with open(path, 'w', encoding='utf-8') as fh:
+            fh.write('{"ts":"2026-07-09T12:00:00Z","event":"run_started"}\n')
+        os.utime(path, (1000 + n, 1000 + n))
+    history = dashboard.list_runs()
+    ok("run list keeps older history accessible", len(history) >= 47,
+       f"visible={len(history)}")
+
+    ok("single-table headers do not reserve missing subtabs", '.recordshell.hasSubtabs th{top:43px}' in dashboard.PAGE)
+    ok("table tabs stay visible during horizontal inspection", '.subtabs{position:sticky;top:0;left:0;' in dashboard.PAGE)
+    ok("record tables use explicit head and body sections", '<thead><tr>' in dashboard.PAGE and '<tbody>' in dashboard.PAGE)
+    ok("record maps safely accept special table and key names", 'Object.create(null)' in dashboard.PAGE and 'function hasOwn(obj,key)' in dashboard.PAGE)
+    ok("successful retries clear stale record errors", 'function clearResolvedError(row,event)' in dashboard.PAGE and 'clearResolvedError(r,e);' in dashboard.PAGE)
+    ok("table tabs serialize special names safely", 'onclick="setRecTab(${esc(JSON.stringify(t))})"' in dashboard.PAGE)
+    ok("checkpoints retain the latest measured progress", 'const measuredProgress=[...progressEvents()].reverse().find' in dashboard.PAGE)
+    ok("same-mode retries retain prior record rows", 'function recordWindowStart()' in dashboard.PAGE)
+    ok("progress uses the source table rather than every derived row",
+       'const primaryTable=started.progress_table||started.table||flatRecords[0]?.table;' in dashboard.PAGE)
+
 print(f"\n{passed} passed, {failed} failed")
 raise SystemExit(1 if failed else 0)

@@ -20,11 +20,10 @@ mutate shared state (CRM, database). Give this folder to a project agent and say
 ## The three pieces
 
 1. **`runguard.py`** — exclusivity + audit trail
-   - `acquire_lock(scope)` — a PID lockfile per scope. A second process on the
-     same scope refuses to start (SystemExit) while the first is alive.
-     Re-entrant within one process. Stale locks (dead PID) are taken over
-     silently. Crash recovery is "just re-run" — resume by re-running the same
-     source with no manual cleanup step.
+   - `acquire_lock(scope)` — a persistent OS advisory lock per scope. A second
+     process on the same scope refuses to start (SystemExit) while the first
+     holds it. Re-entrant within one process. The OS releases a crashed
+     process's lock, so crash recovery is "just re-run" with no manual cleanup.
    - `ledger(scope, event, **fields)` — appends one JSON line to a per-run
      ledger file. This is the local audit trail AND the dashboard's data feed.
    - `start_observed_run(name, ...)` — the boring default wrapper for new
@@ -78,7 +77,7 @@ from runguard import start_observed_run
 
 run = start_observed_run(
     'enrich-leads',
-    lock_key='hubspot-enrich-july-batch',
+    source=args.input,  # actual CSV path, sheet ID, table ID, or export ID
     dry_run=args.dry_run,
     description='Enrich July HubSpot leads and fill missing firmographics',
     todo=len(leads),
@@ -110,7 +109,8 @@ That one helper enforces the minimum run shape:
 - every `run.step(...)` writes a visible `record` row (`running` → `done` or
   `failed`);
 - counters and checkpoints are carried into the final event;
-- `success()` / `fail()` closes the lifecycle and releases the lock.
+- `success()` / `fail()` closes the lifecycle and releases the lock; a process
+  that exits before either writes an explicit `run_abandoned` failure event.
 
 Use the lower-level `acquire_lock()` + `ledger()` primitives when a script needs
 custom event vocabulary, but keep this shape unless there is a real reason not
@@ -224,14 +224,22 @@ Run lanes:
 
 - Same source retry, fix, or dashboard-chat adaptation: keep the same lane
   (`--session <source-id>` or no session), same `table=`, and same stable
-  `key=` values. The retry appends to the same ledger and changed cells update
-  in place with before/after values.
+  `key=` values. The retry appends to the same ledger, retains already-complete
+  rows from the same dry/live mode, and updates changed cells in place.
 - Clean redo, comparison, or new batch: use a new stable `--session <name>` or
   `--session auto` so the dashboard gets a separate historical run.
 
 Use `--session auto` for a separate intentional run. Rely on the same lane
 (re-run with no session) for failure recovery on the same source data, so the
 dashboard updates the existing rows in place.
+
+### When a run is already active
+
+Use `source=` for new workflows so the scope comes from an actual source
+identity rather than a friendly label. If a lock refuses to start, wait for the
+holder or deliberately stop the named PID before starting fresh. A duplicate
+run can create duplicate provider charges, CRM or sheet writes, and corrupted
+history.
 
 ## Event vocabulary (what the dashboard understands)
 
@@ -340,8 +348,8 @@ whatever you load into `entity → ordered candidates` and go. Two rules:
 The write path stays append-only JSONL files, deliberately. Reasons: N
 concurrent processes append with zero contention (a DB would reintroduce
 write-lock coordination between the very processes the locks keep apart);
-a half-written line on crash is one skipped line, not a broken transaction;
-events are schemaless (new fields cost nothing, no migrations across copies);
+a half-written final line is deferred until complete instead of being treated as
+a record; events are schemaless (new fields cost nothing, no migrations across copies);
 and the ledgers stay greppable, attachable, and portable ("copy this folder"
 is the kit's superpower).
 

@@ -36,6 +36,10 @@ import time
 import argparse
 
 
+def _timestamp():
+    return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+
+
 def _load(path):
     out = []
     if not os.path.exists(path):
@@ -82,7 +86,7 @@ def main():
     if a.reply:
         os.makedirs(a.state_dir, exist_ok=True)
         rec = {
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "ts": _timestamp(),
             "run": a.run_id,
             "anchor": a.anchor,
             "author": "agent",

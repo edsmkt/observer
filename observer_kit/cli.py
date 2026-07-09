@@ -9,6 +9,8 @@ import subprocess
 import sys
 import threading
 import time
+from urllib.error import URLError
+from urllib.request import urlopen
 from pathlib import Path
 
 
@@ -28,6 +30,10 @@ def _skill_dir() -> Path:
 
 
 SKILL_DIR = _skill_dir()
+
+
+def _timestamp() -> str:
+    return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
 
 
 def skill_file(name: str) -> Path:
@@ -65,7 +71,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     if args.gitignore:
         gitignore = state_dir / ".gitignore"
         if not gitignore.exists() or args.force:
-            gitignore.write_text("*.lock\nchat.jsonl\n", encoding="utf-8")
+            gitignore.write_text("*.lock\n*.throttle\n*.jsonl\n", encoding="utf-8")
             messages.append(f"wrote {gitignore}")
     print("\n".join(messages))
     print()
@@ -98,6 +104,7 @@ def cmd_test(args: argparse.Namespace) -> int:
         [sys.executable, str(skill_file("test_runguard.py")), str(SKILL_DIR)],
         [sys.executable, str(skill_file("test_lint_emit.py"))],
         [sys.executable, str(skill_file("test_dashboard.py"))],
+        [sys.executable, str(skill_file("test_cli.py"))],
     ]
     for cmd in tests:
         rc = subprocess.call(cmd)
@@ -225,7 +232,7 @@ def cmd_reply(args: argparse.Namespace) -> int:
     if not text:
         raise SystemExit("reply text is required")
     rec = {
-        "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "ts": _timestamp(),
         "run": args.run,
         "anchor": args.anchor,
         "author": "agent",
@@ -238,13 +245,31 @@ def cmd_reply(args: argparse.Namespace) -> int:
     return 0
 
 
-def _start_dashboard(state_dir: Path, port: int) -> subprocess.Popen:
-    return subprocess.Popen(
+def _dashboard_responds(port: int) -> bool:
+    try:
+        with urlopen(f"http://127.0.0.1:{port}/api/runs", timeout=0.25) as response:
+            return response.status == 200
+    except (OSError, URLError):
+        return False
+
+
+def _start_dashboard(state_dir: Path, port: int) -> tuple[subprocess.Popen | None, bool]:
+    if _dashboard_responds(port):
+        return None, True
+    proc = subprocess.Popen(
         [sys.executable, str(skill_file("run_dashboard.py")), str(state_dir), "--port", str(port)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         text=True,
     )
+    for _ in range(30):
+        if _dashboard_responds(port):
+            return proc, False
+        if proc.poll() is not None:
+            break
+        time.sleep(0.1)
+    proc.terminate()
+    raise SystemExit(f"Observer dashboard did not start on http://localhost:{port}/")
 
 
 def _start_watcher(state_dir: Path, run_id: str) -> subprocess.Popen:
@@ -256,6 +281,9 @@ def _start_watcher(state_dir: Path, run_id: str) -> subprocess.Popen:
             "--state-dir",
             str(state_dir),
             "--follow",
+            # The run marker and watcher process are separate processes. Include
+            # a note that lands in that small startup window instead of losing it.
+            "--include-existing",
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
@@ -298,14 +326,17 @@ def cmd_run(args: argparse.Namespace) -> int:
             watcher_thread.start()
 
     if args.dashboard:
-        dashboard_proc = _start_dashboard(state_dir, args.port)
-        print(f"[observer] dashboard: http://localhost:{args.port}/", flush=True)
+        dashboard_proc, dashboard_attached = _start_dashboard(state_dir, args.port)
+        state = "attached to existing dashboard" if dashboard_attached else "dashboard started"
+        print(f"[observer] {state}: http://localhost:{args.port}/", flush=True)
 
     env = os.environ.copy()
     env["RUNGUARD_STATE_DIR"] = str(state_dir)
+    env["PYTHONUNBUFFERED"] = "1"
     if args.session:
         env["RUNGUARD_SESSION"] = (
-            time.strftime("%Y%m%d-%H%M%S") if args.session == "auto" else args.session
+            f"auto-{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-{os.getpid()}"
+            if args.session == "auto" else args.session
         )
     proc = subprocess.Popen(
         command,
@@ -386,6 +417,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     checks.append(("runguard.py vendored", (project / "runguard.py").exists()))
     checks.append(("watch_chat.py vendored", (project / "watch_chat.py").exists()))
     checks.append(("state dir exists", (project / args.state_dir).exists()))
+    checks.append(("state dir ignores local ledger data", (project / args.state_dir / ".gitignore").exists()))
+    checks.append(("operator explainer exists", (project / args.state_dir / "EXPLAIN.md").exists()))
     checks.append(("dashboard available", skill_file("run_dashboard.py").exists()))
     checks.append(("watcher available", skill_file("watch_chat.py").exists()))
     checks.append(("tests available", skill_file("test_runguard.py").exists()))

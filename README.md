@@ -185,7 +185,8 @@ observer-kit doctor ./my-project
 ```
 
 `init` vendors `runguard.py` and `watch_chat.py`, creates `.runguard`, copies
-the `EXPLAIN.md` template, and writes a small `.runguard/.gitignore`.
+the `EXPLAIN.md` template, and writes a `.runguard/.gitignore` that keeps local
+locks, throttles, chat, and ledger JSONL data out of Git.
 
 `watch` is a harness bridge, not an agent. It reads dashboard chat for one run
 and emits structured `OBSERVER_CHAT_EVENT ...` lines to stdout so the active
@@ -209,7 +210,17 @@ runs or make workflow decisions.
 For failure recovery on the same source data, keep the same lane: omit
 `--session`, or pass the same stable session name again. The retry appends to the
 same ledger so the operator sees the failed attempt, checkpoints, fixes, and
-successful continuation in one dashboard run.
+successful continuation in one dashboard run. Same-mode retries retain prior
+record rows and update stable `table` + `key` values in place; a dry-run remains
+separate from the later live table.
+
+For new workflows, prefer `source=<actual source identity>` in
+`start_observed_run()` rather than hand-writing a lock label. Use the resolved
+CSV path, Google Sheet ID, database table/query identity, or export ID. The kit
+derives the lock scope from that identity. If that source is already running,
+wait for it to finish or deliberately stop the named PID before starting fresh.
+A duplicate run can create duplicate provider charges, CRM or sheet writes, and
+corrupted history.
 
 Use `--session auto` only when you intentionally want a fresh historical run in
 the same dashboard state directory, such as a new batch, weekly import, or demo
@@ -238,8 +249,8 @@ limits; it does not prevent duplicate work on overlapping records.
 | `observer_hook.py` | Claude Code PostToolUse hook — catches the `run_started` marker and reminds the agent to start that run's watcher. Add to `.claude/settings.json` on setup (see SKILL) |
 | `EXPLAIN.md` | Template for the plain-English + ASCII "statement of intent" |
 | `example_worker.py` | Runnable end-to-end example (parallel datasets + throttle) |
-| `test_runguard.py` | Acceptance tests for the safety core (lock exclusivity, stale-lock takeover, re-entrancy, scope isolation, ledger append/continuity, cross-process throttle). Run it after vendoring `runguard.py` to prove the guards hold |
-| `test_lint_emit.py`, `test_dashboard.py` | Acceptance tests for the live-emission linter and dashboard JSONL reader. `observer-kit test` runs these with the safety-core tests |
+| `test_runguard.py` | Acceptance tests for the safety core (advisory lock exclusivity, crash recovery, re-entrancy, scope isolation, safe state paths, ledger continuity, terminal failure events, and cross-process throttle). Run it after vendoring `runguard.py` to prove the guards hold |
+| `test_lint_emit.py`, `test_dashboard.py`, `test_cli.py` | Acceptance tests for the live-emission linter, dashboard JSONL reader, and end-to-end CLI lifecycle. `observer-kit test` runs these with the safety-core tests |
 | `references/pattern.md` | The full pattern, event vocabulary, dashboard behavior, safety rules |
 | `references/build-guide.md` | Rebuild the whole stack from scratch, with acceptance tests |
 

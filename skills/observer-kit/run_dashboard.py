@@ -50,7 +50,12 @@ if '--port' in sys.argv:
 CHAT_FILE = os.path.join(SOURCES['runguard'], 'chat.jsonl')
 ACTIVE_S = 120   # a file touched in the last 2 min counts as live
 EVENT_READ_BYTES = 512 * 1024
-RUN_DESC_READ_BYTES = 2 * 1024 * 1024
+LAST_EVENT_READ_BYTES = 128 * 1024
+_SUMMARY_CACHE = {}  # path -> {identity, offset, first, latest}
+
+
+def _timestamp():
+    return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
 
 
 def _first_event(path):
@@ -63,32 +68,68 @@ def _first_event(path):
 
 
 def _summary_event(path):
-    """Use the latest run_started near the head of the ledger for run labels.
+    """Return the newest run_started using a complete, incremental ledger scan.
 
-    Dry-run and full-run attempts often share one JSONL lane. The dashboard table
-    shows the latest attempt, so the sidebar description should not stay pinned
-    to the first dry-run event.
+    A lane can contain a large dry-run, a large full run, and several retries.
+    Reading a fixed head or tail window eventually picks the wrong attempt. The
+    first sidebar pass scans complete JSONL lines; later polls continue from the
+    cached byte offset, so active ledgers cost only their newly appended lines.
     """
-    first = {}
-    latest = {}
     try:
+        stat = os.stat(path)
+    except OSError:
+        return {}
+    identity = (stat.st_dev, stat.st_ino)
+    cached = _SUMMARY_CACHE.get(path)
+    if not cached or cached['identity'] != identity or stat.st_size < cached['offset']:
+        cached = {'identity': identity, 'offset': 0, 'first': {}, 'latest': {}}
+    first, latest, offset = cached['first'], cached['latest'], cached['offset']
+    try:
+        with open(path, 'rb') as fh:
+            fh.seek(offset)
+            while True:
+                line = fh.readline()
+                if not line or not line.endswith(b'\n'):
+                    break  # retry an in-flight final line on the next sidebar poll
+                offset = fh.tell()
+                try:
+                    rec = json.loads(line.decode('utf-8', 'replace'))
+                except json.JSONDecodeError:
+                    continue
+                if not first:
+                    first = rec
+                if (rec.get('event') or rec.get('action')) == 'run_started':
+                    latest = rec
+    except OSError:
+        return latest or first
+    _SUMMARY_CACHE[path] = {'identity': identity, 'offset': offset, 'first': first, 'latest': latest}
+    return latest or first
+
+
+def _last_event(path):
+    """Read the latest complete ledger event without loading a whole large run."""
+    try:
+        size = os.path.getsize(path)
         with open(path, 'rb') as f:
-            chunk = f.read(RUN_DESC_READ_BYTES)
-        for line in chunk.decode('utf-8', 'replace').splitlines():
-            line = line.strip()
-            if not line:
-                continue
+            f.seek(max(0, size - LAST_EVENT_READ_BYTES))
+            chunk = f.read()
+        for line in reversed(chunk.decode('utf-8', 'replace').splitlines()):
             try:
-                rec = json.loads(line)
+                return json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if not first:
-                first = rec
-            if (rec.get('event') or rec.get('action')) == 'run_started':
-                latest = rec
-    except Exception:
-        return {}
-    return latest or first
+    except OSError:
+        pass
+    return {}
+
+
+def _is_live_run(path, mtime, now):
+    """A fresh terminal event means finished, even though the file is recent."""
+    last = _last_event(path)
+    event = last.get('event') or last.get('action')
+    if event in {'run_finished', 'run_failed', 'run_abandoned'}:
+        return False
+    return now - mtime < ACTIVE_S
 
 
 def _describe(first):
@@ -136,7 +177,7 @@ def list_runs():
                 runs.append({'id': f'push:{d}', 'label': d, 'name': name, 'when': when,
                              'desc': _describe(_summary_event(ev)), 'kind': 'push',
                              'path': os.path.abspath(os.path.join(push_dir, d)),
-                             'mtime': mtime, 'live': now - mtime < ACTIVE_S})
+                             'mtime': mtime, 'live': _is_live_run(ev, mtime, now)})
     for kind in ('enrich', 'runguard'):
         d = SOURCES[kind]
         if os.path.isdir(d):
@@ -148,9 +189,9 @@ def list_runs():
                     runs.append({'id': f'{kind}:{f}', 'label': f, 'name': name, 'when': when,
                                  'desc': _describe(_summary_event(p)), 'kind': kind,
                                  'path': os.path.abspath(p),
-                                 'mtime': mtime, 'live': now - mtime < ACTIVE_S})
+                                 'mtime': mtime, 'live': _is_live_run(p, mtime, now)})
     runs.sort(key=lambda r: -r['mtime'])
-    return runs[:40]
+    return runs
 
 
 def locks():
@@ -163,7 +204,9 @@ def locks():
                 try:
                     with open(os.path.join(d, f), encoding='utf-8') as fh:
                         lock = json.load(fh)
-                    pid = int(lock.get('pid', -1))
+                    pid = int(lock.get('pid', 0))
+                    if pid <= 0:
+                        continue
                     try:
                         os.kill(pid, 0)
                         alive = True
@@ -192,25 +235,31 @@ def read_events(run_id, offsets):
     """Incremental tail: offsets = {path: byte_offset} from the client."""
     events, new_offsets = [], {}
     for path in _files_for(run_id):
-        size = os.path.getsize(path)
-        if path in offsets:
-            off = int(offsets.get(path, 0))
-            read_limit = EVENT_READ_BYTES
-        else:
-            off = 0
+        try:
+            size = os.path.getsize(path)
+            try:
+                off = int(offsets.get(path, 0))
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                off = 0
+            off = max(0, off)
             read_limit = EVENT_READ_BYTES  # cap: fills in progressively across polls
-        if size < off:
-            off = 0  # rotated/truncated
-        with open(path, 'rb') as f:
-            f.seek(off)
-            chunk = f.read(read_limit)
-            end = f.tell()
-            if end < size and chunk and not chunk.endswith(b'\n'):
-                chunk += f.readline()
+            if size < off:
+                off = 0  # rotated/truncated
+            with open(path, 'rb') as f:
+                f.seek(off)
+                chunk = f.read(read_limit)
                 end = f.tell()
-            new_offsets[path] = end
-        for line in chunk.decode('utf-8', 'replace').splitlines():
-            line = line.strip()
+                if end < size and chunk and not chunk.endswith(b'\n'):
+                    chunk += f.readline()
+                    end = f.tell()
+        except OSError:
+            continue  # writer rotated or removed the file between discovery and read
+        lines = chunk.splitlines(keepends=True)
+        if lines and not lines[-1].endswith(b'\n'):
+            end -= len(lines.pop())
+        new_offsets[path] = end
+        for raw_line in lines:
+            line = raw_line.decode('utf-8', 'replace').strip()
             if not line:
                 continue
             try:
@@ -289,13 +338,13 @@ h3{margin:10px 0 8px;font-size:11px;color:var(--dim);text-transform:uppercase;le
 .recordshell{height:calc(100vh - 214px);overflow:auto;border-radius:10px;background:var(--card);border:1px solid var(--line)}
 .recordshell .tablewrap{overflow:visible;max-height:none;border-radius:0}
 .tablewrap{overflow:auto;max-height:calc(100vh - 150px);border-radius:10px;background:var(--card);border:1px solid var(--line)}
-.subtabs{position:sticky;top:0;z-index:8;display:flex;gap:6px;flex-wrap:wrap;padding:8px;background:#151c24;border-bottom:1px solid var(--line)}
+.subtabs{position:sticky;top:0;left:0;z-index:8;display:flex;gap:6px;flex-wrap:wrap;padding:8px;background:#151c24;border-bottom:1px solid var(--line)}
 .subtab{padding:5px 12px;border-radius:7px;background:#202a35;color:var(--dim);cursor:pointer;font-size:12.5px;border:1px solid transparent}
 .subtab:hover{color:var(--txt);border-color:#3a4a5e}
 .subtab.sel{background:#314052;color:var(--txt);border-color:#43566c}
 table{table-layout:fixed;border-collapse:separate;border-spacing:0;background:var(--card)}
 th{position:sticky;top:0;z-index:2;background:#242e3a;text-align:left;padding:9px 12px;font-size:11.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.recordshell th{top:43px}
+.recordshell.hasSubtabs th{top:43px}
 td{padding:8px 12px;border-top:1px solid var(--line);vertical-align:top;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 tr:hover td{background:#232c36}
 /* freeze the first column so it stays visible when scrolling a wide table right */
@@ -495,7 +544,18 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape')closeCellModal();});
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeChat();});
 document.addEventListener('click',e=>{const pop=document.getElementById('chatpop');if(pop.style.display==='block'&&!pop.contains(e.target)&&!e.target.closest('[data-col]'))closeChat();});
 
-function esc(s){return String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function hasOwn(obj,key){return Object.prototype.hasOwnProperty.call(obj,key)}
+function resolvesRecordError(event){
+  return /^(done|success|ok|complete|completed|resolved|fixed|synced|written|appended)$/i
+    .test(String(event.status??event.condition??event.outcome??''));
+}
+function clearResolvedError(row,event){
+  if(resolvesRecordError(event)&&!hasOwn(event,'error')&&hasOwn(row,'error')){
+    if(row.__prev)row.__prev.error=row.error;
+    delete row.error;
+  }
+}
 function fmt(v){return v===true?'✓':v===false?'—':(v==null?'':(typeof v==='object'?JSON.stringify(v):String(v)));}
 function sidebarIcon(collapsed){
   const d=collapsed?'M10 8l4 4-4 4':'M14 8l-4 4 4 4';
@@ -524,9 +584,10 @@ function flatChat(){
 }
 function bridgeSummary(){
   if(!sel)return {title:'No run selected',desc:'Pick a run to inspect its review bridge.',state:'Idle',cls:'idle'};
-  const started=[...all].find(e=>(e.event||e.action)==='run_started')||{};
-  const finished=[...all].reverse().find(e=>['run_finished','run_failed'].includes(e.event||e.action));
-  const failed=finished&&(finished.event||finished.action)==='run_failed';
+  const events=attemptEvents();
+  const started=[...events].find(e=>(e.event||e.action)==='run_started')||{};
+  const finished=[...events].reverse().find(e=>['run_finished','run_failed','run_abandoned'].includes(e.event||e.action));
+  const failed=finished&&['run_failed','run_abandoned'].includes(finished.event||finished.action);
   const desc=selMeta?.desc||started.description||started.name||selMeta?.name||selMeta?.label||'';
   if(failed)return {title:'Run needs attention',desc,state:'Failed',cls:'attn'};
   if(finished)return {title:started.dry_run?'Dry-run sample finished':'Run finished',desc,state:'Awaiting review',cls:'done'};
@@ -593,15 +654,16 @@ function isAttentionRecord(r){
   return false;
 }
 function recordGroups(events){
-  const SKIP=new Set(['ts','event','action','_file','key','table']);
-  const groups={}, gorder=[];
+  const SKIP=new Set(['ts','event','action','_file','key','table','__prev']);
+  const groups=Object.create(null), gorder=[];
   for(const e of (events||attemptEvents()).filter(e=>(e.event||e.action)==='record')){
     const t=e.table||'records';
-    if(!groups[t]){groups[t]={rows:{},order:[],cols:[]};gorder.push(t);}
+    if(!hasOwn(groups,t)){groups[t]={rows:Object.create(null),order:[],cols:[]};gorder.push(t);}
     const g=groups[t];
     const k=String(e.key ?? e.company ?? e.name ?? JSON.stringify(e));
     let r=g.rows[k];
-    if(!r){r=g.rows[k]={__prev:{}};g.order.push(k);}
+    if(!hasOwn(g.rows,k)){r=Object.create(null);r.__prev=Object.create(null);g.rows[k]=r;g.order.push(k);}
+    clearResolvedError(r,e);
     for(const f of Object.keys(e)){
       if(SKIP.has(f))continue;
       if(!g.cols.includes(f))g.cols.push(f);
@@ -618,6 +680,7 @@ function renderRecordTable(groups, gorder, label){
   const g=groups[recTab];
   const rowKeys=view==='attention' ? g.order.filter(k=>isAttentionRecord(g.rows[k])) : g.order;
   const visibleRows=rowKeys.map(k=>g.rows[k]);
+  if(view==='attention'&&!rowKeys.length)return '<div class=empty>No records need attention right now.</div>';
   const always=new Set(['company','name','status','source_status','linkedin_status','contact_status','error']);
   let cols=g.cols.filter(c=>{
     const filled=visibleRows.filter(r=>r[c]!==undefined&&r[c]!==null&&r[c]!=='').length;
@@ -641,24 +704,24 @@ function renderRecordTable(groups, gorder, label){
     if(sum<avail){const kk=avail/sum;cols.forEach(c=>gbase[c]=Math.round(gbase[c]*kk));}
   }
   const gtot=cols.reduce((s,c)=>s+gbase[c],0);
-  if(view==='attention'&&!rowKeys.length)return '<div class=empty>No records need attention right now.</div>';
-  const subtabs=gorder.length>1
-    ? `<div class=subtabs>`+gorder.map(t=>`<span class="subtab ${t===recTab?'sel':''}" onclick="setRecTab('${esc(t)}')">${esc(t)} <small>· ${groups[t].order.length}</small></span>`).join('')+'</div>'
+  const hasSubtabs=gorder.length>1;
+  const subtabs=hasSubtabs
+    ? `<div class=subtabs>`+gorder.map(t=>`<span class="subtab ${t===recTab?'sel':''}" onclick="setRecTab(${esc(JSON.stringify(t))})">${esc(t)} <small>· ${groups[t].order.length}</small></span>`).join('')+'</div>'
     : '';
   const rrow=(k)=>{const r=g.rows[k];
     return `<tr data-key="${esc(recTab+'::'+k)}" data-co="${esc(k)}" data-name="${esc(k)}">`+
       cols.map(c=>`<td data-col="${esc(recTab+'::'+c)}">${gcell(c,r[c])}</td>`).join('')+`</tr>`;
   };
-  const thead=`<tr>${cols.map(c=>`<th data-col="${esc(recTab+'::'+c)}" style="width:${gbase[c]}px">${esc(c)}<span class=rz></span></th>`).join('')}</tr>`;
+  const thead=`<thead><tr>${cols.map(c=>`<th data-col="${esc(recTab+'::'+c)}" style="width:${gbase[c]}px">${esc(c)}<span class=rz></span></th>`).join('')}</tr></thead>`;
   // small tables (≤500 rows): build in one shot
   if(rowKeys.length<=500)
-    return `${label?`<div class=card><h4>${esc(label)}</h4></div>`:''}<div class=recordshell style="height:${contentViewportHeight()}px">${subtabs}<div class=tablewrap><table style="width:${gtot}px">${thead}${rowKeys.map(rrow).join('')}</table></div></div>`;
+    return `${label?`<div class=card><h4>${esc(label)}</h4></div>`:''}<div class="recordshell${hasSubtabs?' hasSubtabs':''}" style="height:${contentViewportHeight()}px">${subtabs}<div class=tablewrap><table style="width:${gtot}px">${thead}<tbody>${rowKeys.map(rrow).join('')}</tbody></table></div></div>`;
   // large tables: write shell + thead immediately, stream tbody rows via setTimeout
   _buildAbort && _buildAbort();
   const shell=document.createElement('div');
-  shell.innerHTML=`${label?`<div class=card><h4>${esc(label)}</h4></div>`:''}<div class=recordshell style="height:${contentViewportHeight()}px">${subtabs}<div class=tablewrap><table style="width:${gtot}px">${thead}</table></div></div>`;
+  shell.innerHTML=`${label?`<div class=card><h4>${esc(label)}</h4></div>`:''}<div class="recordshell${hasSubtabs?' hasSubtabs':''}" style="height:${contentViewportHeight()}px">${subtabs}<div class=tablewrap><table style="width:${gtot}px">${thead}<tbody></tbody></table></div></div>`;
   content.replaceChildren(shell);
-  const table=shell.querySelector('.tablewrap table');
+  const tbody=shell.querySelector('.tablewrap tbody');
   let aborted=false;
   _buildAbort=()=>{aborted=true};
   const BATCH=500;let idx=0;
@@ -667,7 +730,7 @@ function renderRecordTable(groups, gorder, label){
     const end=Math.min(idx+BATCH, rowKeys.length);
     let rows='';
     for(; idx<end; idx++)rows+=rrow(rowKeys[idx]);
-    table.insertAdjacentHTML('beforeend', rows);
+    tbody.insertAdjacentHTML('beforeend', rows);
     if(idx<rowKeys.length)setTimeout(appendBatch, 0);
     else decorateChat();
   }
@@ -694,7 +757,8 @@ function humanize(e){
   const co=e.company?` at ${esc(e.company)}`:'';
   switch(ev){
     case 'run_started': return {icon:'▶️',cls:'info',text:`Run started — ${e.companies??e.todo??'?'} companies`+(e.worst_case_credits?`, spend ceiling ${e.worst_case_credits} credits`:'')};
-    case 'run_finished': return {icon:'🏁',cls:'info',text:`Run finished — `+Object.entries(e).filter(([k])=>!['ts','event','_file'].includes(k)).map(([k,v])=>`${k.replaceAll('_',' ')}: ${typeof v==='object'?JSON.stringify(v):v}`).join(', ')};
+    case 'run_finished': return {icon:'🏁',cls:'info',text:`Run finished — `+Object.entries(e).filter(([k])=>!['ts','event','_file'].includes(k)).map(([k,v])=>`${esc(k.replaceAll('_',' '))}: ${esc(typeof v==='object'?JSON.stringify(v):v)}`).join(', ')};
+    case 'run_abandoned': return {icon:'⚠',cls:'err',text:`Run abandoned — ${esc(e.error||'process exited before closing the run')}`};
     case 'progress': {
       const phase=esc(e.phase||'progress');
       const pct=(e.done!==undefined&&e.total)?` (${Math.round((Number(e.done)/Number(e.total))*100)}%)`:'';
@@ -780,10 +844,24 @@ function latestAttemptIndex(){
   }
   return idx;
 }
+function recordWindowStart(){
+  const latest=latestAttemptIndex();
+  if(latest<0)return 0;
+  const dry=Boolean(all[latest].dry_run);
+  let start=latest;
+  for(let i=latest-1;i>=0;i--){
+    if(eventName(all[i])==='run_started'){
+      if(Boolean(all[i].dry_run)!==dry)break;
+      start=i;
+    }
+  }
+  return start;
+}
 function attemptEvents(){
   const idx=latestAttemptIndex();
   return idx>=0 ? all.slice(idx) : all;
 }
+function recordEvents(){return all.slice(recordWindowStart());}
 function progressEvents(){
   return attemptEvents().filter(e=>{
     const a=eventName(e);
@@ -864,10 +942,10 @@ function render(){
   // Works for ANY workflow — not just contact enrichment. First column frozen,
   // resize/expand/scroll/chat all apply. Falls through to the enrichment table below
   // when a run has no `record` events.
-  const recEvents=attemptEvents().filter(e=>(e.event||e.action)==='record');
+  const recEvents=recordEvents().filter(e=>(e.event||e.action)==='record');
   if(recEvents.length){
-    const recVer=`${latestAttemptIndex()}:${all.length}`;
-    if(recVer!==_recGroupsVer||!_recGroupsCache)_recGroupsCache=recordGroups(attemptEvents()),_recGroupsVer=recVer;
+    const recVer=`${recordWindowStart()}:${all.length}`;
+    if(recVer!==_recGroupsVer||!_recGroupsCache)_recGroupsCache=recordGroups(recordEvents()),_recGroupsVer=recVer;
     const {groups,gorder}=_recGroupsCache;
     const html=renderRecordTable(groups,gorder,'');
     if(html!==null)content.innerHTML=html;
@@ -918,7 +996,7 @@ function render(){
   }
   const totalW=COLS.reduce((s,c)=>s+base[c],0);
   content.innerHTML=list.length
-    ?`<div class=tablewrap><table style="width:${totalW}px"><tr>${COLS.map(c=>`<th data-col="${c}" style="width:${base[c]}px">${c}<span class=rz></span></th>`).join('')}</tr>`+
+    ?`<div class=tablewrap><table style="width:${totalW}px"><thead><tr>${COLS.map(c=>`<th data-col="${c}" style="width:${base[c]}px">${c}<span class=rz></span></th>`).join('')}</tr></thead><tbody>`+
       list.map((r,i)=>{
         const first=i===0||list[i-1].company!==r.company;
         return `<tr data-key="${esc(key(r.company,r.name))}" data-co="${esc(r.company||'')}" data-name="${esc(r.name||'')}">`+
@@ -926,7 +1004,7 @@ function render(){
         `<td data-col="Tier"><small>${tierLabel[r.tier]??''}${r.tierPrev?` <span style="color:var(--warn)">· was ${tierLabel[r.tierPrev]??r.tierPrev}</span>`:''}</small></td>`+
         `<td data-col="Phone">${pill(r.phoneState,r.phone,undefined,r.phonePrev)}</td><td data-col="Email">${pill(r.emailState,r.email,r.emailSource,r.emailPrev)}</td>`+
         `<td data-col="CRM id">${r.hs?`<span class="pill ok">${esc(r.hs)}</span>`+wasTag(r.hsPrev):'<span class="pill dim">—</span>'}</td></tr>`;
-      }).join('')+'</table></div>'
+      }).join('')+'</tbody></table></div>'
     :'<div class=empty>No per-person results yet — see the Run info tab for progress.</div>';
   decorateChat();
 }
@@ -938,16 +1016,21 @@ function renderStats(){
   // counts (e.g. "62 linkedin", "5 fallback"). Per-provider credits and errors always
   // show (any run can spend or fail). Enrichment runs (phone/email events) keep their
   // familiar chips as a fallback.
-  const prov={}; let errors=0;
-  const recByTable={};   // table -> {key -> merged row}
+  const prov=Object.create(null); let errors=0;
+  const recByTable=Object.create(null);   // table -> {key -> merged row}
   let enrichRun=false; const s={phones:0,emails:0,misses:0,writes:0,assoc:0};
   const events=attemptEvents();
-  for(const e of events){
+  const tableEvents=recordEvents().filter(e=>(e.action||e.event||'')==='record');
+  for(const e of [...tableEvents,...events.filter(e=>(e.action||e.event||'')!=='record')]){
     const a=e.action||e.event||'';
     if(a==='record'){
-      const t=e.table||'records', g=recByTable[t]=recByTable[t]||{};
+      const t=e.table||'records';
+      if(!hasOwn(recByTable,t))recByTable[t]=Object.create(null);
+      const g=recByTable[t];
       const k=String(e.key ?? e.company ?? e.name ?? JSON.stringify(e));
-      g[k]=Object.assign(g[k]||{}, e);
+      if(!hasOwn(g,k))g[k]=Object.create(null);
+      clearResolvedError(g[k],e);
+      Object.assign(g[k], e);
     }
     if(a==='phone_found'){s.phones++;enrichRun=true;}
     if(a==='email_found'){s.emails++;enrichRun=true;}
@@ -967,7 +1050,7 @@ function renderStats(){
   const flatRecords=[];
   const tables=Object.keys(recByTable);
   const started=[...events].find(e=>(e.event||e.action)==='run_started')||{};
-  const fin=[...events].reverse().find(e=>(e.event||e.action)==='run_finished');
+  const fin=[...events].reverse().find(e=>['run_finished','run_failed','run_abandoned'].includes(e.event||e.action));
   const wantedSummary=Array.isArray(started.summary_metrics)?started.summary_metrics:[];
   const pushMetric=(label,value,cls)=>{
     if(value!==undefined&&value!==null&&value!=='')chips.push([label,value,cls]);
@@ -1010,7 +1093,8 @@ function renderStats(){
       if(primary)pushMetric(`${primary} rows`, Object.keys(recByTable[primary]).length);
     }
   } else if(progressEvents().length){
-    const latest=progressEvents()[progressEvents().length-1];
+    const progress=progressEvents();
+    const latest=[...progress].reverse().find(e=>e.done!==undefined&&e.total!==undefined)||progress[progress.length-1];
     const phase=latest.phase||latest.checkpoint||'progress';
     if(latest.done!==undefined&&latest.total!==undefined){
       chips.push([phase, `${latest.done}/${latest.total}`, 'info']);
@@ -1037,7 +1121,7 @@ function activityStrip(flatRecords, errors){
   const events=attemptEvents();
   const last=events[events.length-1]||{};
   const started=[...events].find(e=>(e.event||e.action)==='run_started')||{};
-  const finished=[...events].reverse().find(e=>['run_finished','run_failed'].includes(e.event||e.action));
+  const finished=[...events].reverse().find(e=>['run_finished','run_failed','run_abandoned'].includes(e.event||e.action));
   const dry=[...events].reverse().find(e=>e.dry_run!==undefined);
   const dryText=dry ? (dry.dry_run?'Dry run · no writes':'Live run · writes enabled') : 'Write mode unknown';
   const lastRecord=[...events].reverse().find(e=>(e.event||e.action)==='record')||{};
@@ -1046,7 +1130,7 @@ function activityStrip(flatRecords, errors){
   const stale=!finished && parseTs(last.ts) && Date.now()-parseTs(last.ts)>60000;
   let state='Waiting', cls='';
   if(finished){
-    state=(finished.event||finished.action)==='run_failed'?'Failed':'Finished';
+    state=['run_failed','run_abandoned'].includes(finished.event||finished.action)?'Failed':'Finished';
     cls=state==='Failed'?'failed':'done';
   }else if(stale){
     state='Stale';
@@ -1057,7 +1141,7 @@ function activityStrip(flatRecords, errors){
   }
   const terminalSummary=(e)=>{
     if(!e)return '';
-    if((e.event||e.action)==='run_failed')return `Failed · ${String(e.error||'see Run info').slice(0,90)}`;
+    if(['run_failed','run_abandoned'].includes(e.event||e.action))return `Failed · ${String(e.error||'see Run info').slice(0,90)}`;
     const priority=['with_contacts','no_contacts','total_contacts','processed','credits_spent','errors'];
     const parts=[];
     for(const k of priority){
@@ -1082,14 +1166,22 @@ function activityStrip(flatRecords, errors){
         : humanize(last).text?.replace(/<[^>]+>/g,'') || 'No events yet';
   const recordAttention=flatRecords.filter(({row})=>isAttentionRecord(row)).length;
   const attention=flatRecords.length ? recordAttention : errors;
+  // `todo` normally describes the source items (for example, companies), not
+  // every derived record table (contacts, writes, etc.). Count the source table
+  // so a 3,000-company run with 20 emitted contacts does not read 3020 / 3000.
+  const primaryTable=started.progress_table||started.table||flatRecords[0]?.table;
+  const progressRecords=primaryTable
+    ? flatRecords.filter(({table})=>table===primaryTable)
+    : flatRecords;
+  const measuredProgress=[...progressEvents()].reverse().find(e=>e.done!==undefined&&e.total!==undefined);
   const progress=started.todo
-    ? (last.done!==undefined&&last.total!==undefined
-        ? `${last.done} / ${last.total}`
-        : `${flatRecords.filter(({row})=>String(row.status||'').toLowerCase()==='done').length} / ${started.todo}`)
+    ? (measuredProgress
+        ? `${measuredProgress.done} / ${measuredProgress.total}`
+        : `${progressRecords.filter(({row})=>String(row.status||'').toLowerCase()==='done').length} / ${started.todo}`)
     : flatRecords.length
       ? `${flatRecords.length} records`
-      : last.done!==undefined&&last.total!==undefined
-        ? `${last.done} / ${last.total}`
+      : measuredProgress
+        ? `${measuredProgress.done} / ${measuredProgress.total}`
       : events.length
         ? `${events.length} events`
         : 'No events yet';
@@ -1187,7 +1279,7 @@ class Handler(BaseHTTPRequestHandler):
             anchor = (data.get('anchor') or '')[:300]
             if text and run and anchor:
                 os.makedirs(os.path.dirname(CHAT_FILE), exist_ok=True)
-                rec = {'ts': time.strftime('%Y-%m-%dT%H:%M:%S'), 'run': run,
+                rec = {'ts': _timestamp(), 'run': run,
                        'anchor': anchor, 'author': 'user', 'text': text}
                 with open(CHAT_FILE, 'a', encoding='utf-8') as fh:
                     fh.write(json.dumps(rec, ensure_ascii=False) + '\n')
@@ -1255,6 +1347,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 offsets = json.loads((q.get('offsets') or ['{}'])[0])
             except json.JSONDecodeError:
+                offsets = {}
+            if not isinstance(offsets, dict):
                 offsets = {}
             events, new_offsets = read_events(run_id, offsets)
             self._json({'events': events, 'offsets': new_offsets})

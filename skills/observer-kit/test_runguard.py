@@ -37,7 +37,8 @@ for _ in range(50):
     time.sleep(0.1)
 rc, out, err = child("import runguard; runguard.acquire_lock('scopeA'); print('ACQUIRED')")
 ok("2nd run on same scope refuses (nonzero exit)", rc != 0, f"rc={rc}")
-ok("refusal message explains why", 'REFUS' in err.upper() or 'refus' in err, err.strip()[:80])
+ok("refusal warning explains consequences", 'WARNING:' in err and 'duplicate provider charges' in err and 'kill ' in err,
+   err.strip()[:160])
 
 # ---- 2. Different scope is NOT blocked while scopeA is held ----
 rc2, out2, _ = child("import runguard; runguard.acquire_lock('scopeB'); print('ACQUIRED')")
@@ -99,7 +100,9 @@ with run.step('enrich_lead', table='companies', key='lead-1', company='acme'):
     run.count('leads_enriched')
     run.checkpoint('last_lead', 'lead-1')
 run.success(processed=1)
-assert not os.path.exists(os.path.join(os.environ['RUNGUARD_STATE_DIR'], 'wrapper-demo.lock'))
+# Lockfiles are deliberately persistent: the OS flock, not file deletion, is the guard.
+runguard.acquire_lock('wrapper-demo')
+runguard.release_lock('wrapper-demo')
 print(runguard.ledger_path('wrapper-demo'))
 """)
 ok("start_observed_run closes and releases its lock", rc8 == 0 and 'wrapper-demo.jsonl' in out8,
@@ -108,6 +111,7 @@ wrapper_files = glob.glob(f'{STATE}/wrapper-demo.jsonl')
 if wrapper_files:
     wrapper_lines = [json.loads(l) for l in open(wrapper_files[0]) if l.strip()]
     ok("wrapper logs dry-run run_started", wrapper_lines[0]['event'] == 'run_started' and wrapper_lines[0]['dry_run'] is True)
+    ok("ledger timestamps are explicit UTC", wrapper_lines[0]['ts'].endswith('Z'))
     ok("wrapper step records running then done",
        [l.get('status') for l in wrapper_lines if l.get('event') == 'record'] == ['running', 'done'])
     ok("wrapper success carries counters + checkpoints",
@@ -125,6 +129,136 @@ elapsed = time.time() - t0
 expected = (RATE*0 + (CALLS*PROCS - 1)) / RATE   # (total-1)/rate
 ok(f"throttle paces cross-process ({CALLS*PROCS} calls @ {RATE}/s ≈ {expected:.1f}s)",
    elapsed >= expected*0.7, f"took {elapsed:.2f}s (per-process-broken would be ~{(CALLS-1)/RATE:.1f}s)")
+
+# ---- 10. Scope/resource names are safe filenames, not paths ----
+rc10, out10, err10 = child("""
+import os, runguard
+runguard.acquire_lock('hubspot/list-a')
+runguard.ledger('../escaped', 'record', table='companies', key='x')
+p = runguard.ledger_path('../escaped')
+assert os.path.realpath(p).startswith(os.path.realpath(os.environ['RUNGUARD_STATE_DIR']) + os.sep)
+print('SAFE')
+""")
+ok("path-like scope names stay inside state dir", rc10 == 0 and 'SAFE' in out10, f"rc={rc10} err={err10.strip()[:80]}")
+
+# ---- 11. A forgotten close leaves an explicit failed terminal event ----
+rc11, out11, err11 = child("""
+import runguard
+runguard.start_observed_run('abandoned-demo')
+raise RuntimeError('boom')
+""")
+abandoned = os.path.join(STATE, 'abandoned-demo.jsonl')
+abandoned_events = [json.loads(line).get('event') for line in open(abandoned) if line.strip()]
+ok("unhandled exits log run_abandoned", rc11 != 0 and abandoned_events[-1] == 'run_abandoned', str(abandoned_events))
+
+# ---- 12. Simultaneous first starts have exactly one flock holder ----
+go = os.path.join(STATE, 'race.go')
+race_code = """
+import os, time, runguard
+while not os.path.exists(%r):
+    time.sleep(.01)
+runguard.acquire_lock('simultaneous-race')
+print('ACQUIRED')
+time.sleep(.5)
+""" % go
+race_a = child(race_code, bg=True)
+race_b = child(race_code, bg=True)
+time.sleep(.1)
+open(go, 'w').write('go')
+race_out = []
+for proc in (race_a, race_b):
+    out, err = proc.communicate(timeout=10)
+    race_out.append((proc.returncode, out, err))
+ok("simultaneous first starts have one holder",
+   sum(1 for rc, out, _ in race_out if rc == 0 and 'ACQUIRED' in out) == 1
+   and sum(1 for rc, _, _ in race_out if rc != 0) == 1,
+   str([(rc, out.strip(), err.strip()[:40]) for rc, out, err in race_out]))
+
+# ---- 13. Source-derived scopes are stable and reject manual alternatives ----
+source_file = os.path.join(STATE, 'actual-source.csv')
+open(source_file, 'w').write('id\n1\n')
+rc13, out13, err13 = child("""
+import runguard
+p = %r
+first = runguard.source_scope('enrich', p)
+second = runguard.source_scope('enrich', p)
+assert first == second
+run = runguard.start_observed_run('enrich', source=p)
+assert run.scope == first
+run.success()
+try:
+    runguard.start_observed_run('enrich', source=p, lock_key='made-up-label')
+except ValueError:
+    print('SOURCE-SAFE')
+""" % source_file)
+ok("source-derived scopes are stable and reject manual alternatives",
+   rc13 == 0 and 'SOURCE-SAFE' in out13, f"rc={rc13} err={err13.strip()[:80]}")
+
+# ---- 14. Concurrent append stress: every JSONL event survives and parses ----
+WRITERS, EVENTS_PER_WRITER = 8, 75
+stress_code = """
+import runguard, sys
+worker, count = sys.argv[1], int(sys.argv[2])
+for n in range(count):
+    runguard.ledger('append-stress', 'record', table='rows', key=f'{worker}-{n}', worker=worker, n=n)
+"""
+stress = [subprocess.Popen([sys.executable, '-c', stress_code, str(w), str(EVENTS_PER_WRITER)],
+                           env=ENV, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+          for w in range(WRITERS)]
+for proc in stress:
+    proc.wait(timeout=30)
+stress_path = os.path.join(STATE, 'append-stress.jsonl')
+try:
+    stress_events = [json.loads(line) for line in open(stress_path, encoding='utf-8') if line.strip()]
+except (OSError, json.JSONDecodeError) as exc:
+    stress_events = []
+    stress_error = str(exc)
+else:
+    stress_error = ''
+stress_keys = {event.get('key') for event in stress_events}
+ok("concurrent ledger appends keep every complete JSONL event",
+   len(stress_events) == WRITERS * EVENTS_PER_WRITER and len(stress_keys) == WRITERS * EVENTS_PER_WRITER,
+   f"events={len(stress_events)} unique={len(stress_keys)} {stress_error}")
+
+# ---- 15. Step exceptions write one failed row and an explicit terminal failure ----
+rc15, out15, err15 = child("""
+import runguard
+run = runguard.start_observed_run('step-exception')
+try:
+    with run.step('mutate', table='companies', key='bad-row'):
+        raise ValueError('planned step failure')
+except ValueError as exc:
+    run.fail(exc)
+""")
+step_exception_path = os.path.join(STATE, 'step-exception.jsonl')
+step_exception_events = [json.loads(line) for line in open(step_exception_path) if line.strip()]
+ok("step exceptions retain row failure and terminal failure",
+   rc15 == 0
+   and [event.get('status') for event in step_exception_events if event.get('event') == 'record'] == ['running', 'failed']
+   and step_exception_events[-1].get('event') == 'run_failed',
+   str(step_exception_events))
+
+# ---- 16. Source path aliases coordinate through the resolved source identity ----
+real_source = os.path.join(STATE, 'source-real.csv')
+link_source = os.path.join(STATE, 'source-link.csv')
+open(real_source, 'w').write('id\n1\n')
+os.symlink(real_source, link_source)
+rc16, out16, err16 = child("""
+import runguard
+assert runguard.source_scope('sync', %r) == runguard.source_scope('sync', %r)
+print('SAME-SCOPE')
+""" % (real_source, link_source))
+ok("source symlinks resolve to the same lock scope", rc16 == 0 and 'SAME-SCOPE' in out16,
+   f"rc={rc16} err={err16.strip()[:80]}")
+
+# ---- 17. Sanitized names cannot collide with a friendly filename lookalike ----
+rc17, out17, err17 = child("""
+import runguard
+assert runguard._safe_component('../same', 'scope') != runguard._safe_component('same', 'scope')
+print('NO-COLLISION')
+""")
+ok("sanitized scope names keep a collision-resistant digest", rc17 == 0 and 'NO-COLLISION' in out17,
+   f"rc={rc17} err={err17.strip()[:80]}")
 
 print(f"\n{'='*48}\n  {passed} passed, {failed} failed\n{'='*48}")
 sys.exit(1 if failed else 0)

@@ -69,10 +69,11 @@ from runguard import start_observed_run
 
 run = start_observed_run(
     'workflow-name',
-    lock_key='dataset-or-system-identity',
+    source=args.input,  # actual CSV path, sheet ID, table ID, or API export ID
     dry_run=args.dry_run,
     description='What this run does',
     todo=len(items),
+    progress_table='companies',  # table counted against todo when there are multiple tables
     summary_metrics=[
         {'key': 'processed', 'label': 'processed'},
         {'key': 'qualified', 'label': 'qualified'},
@@ -97,6 +98,11 @@ except Exception as exc:
 
 Stable `table=` and `key=` values are what let reruns update rows in place and
 show before/after values.
+
+`source=` is the preferred lock boundary for new workflows. Pass the actual
+source identity, never a mutable display label such as `csv-july`, a date, or a
+run nickname. Observer Kit derives a stable scope from it, so the same source
+refuses a second start while a genuinely separate source can run in parallel.
 
 ## Live observability contract
 
@@ -170,6 +176,8 @@ open-ended question. Include:
 
 - `table=` groups, such as `companies`, `contacts`, `writes`;
 - stable `key=` values;
+- the source `progress_table` when `todo` measures one table but the run also
+  emits derived tables such as contacts or writes;
 - source/destination columns, such as `source`, `hubspot`, `google_sheet`;
 - outcome columns, such as `condition`, `status`, `error`;
 - 3-5 headline `summary_metrics`; pick the few counters that matter most.
@@ -196,7 +204,9 @@ separate run so you can compare old and new results?"
 
 ## Safety rules
 
-- Treat a lock refusal as the guard working: stop the named PID deliberately or wait for it to finish.
+- If a run is already active for the same source, wait for it to finish or
+  deliberately stop the named PID before starting fresh. A duplicate run can
+  create duplicate provider charges, CRM or sheet writes, and corrupted history.
 - Default to one lock scope per external system or dataset identity.
 - Parallel scopes are safe only when datasets are provably disjoint. If overlap
   is possible, use the same lock scope and run serially.

@@ -73,22 +73,22 @@ is in this folder — the load-bearing details you must not lose when rebuilding
 
 - State dir: `$RUNGUARD_STATE_DIR` env var, else `./.runguard` next to the
   module. **Every process that must coordinate has to resolve the same dir.**
-- Lockfile per scope: `<state>/<scope>.lock` containing JSON
-  `{"pid": ..., "started": "...", "scope": ...}`.
+- Persistent, safe-filename lockfile per scope containing JSON
+  `{"pid": ..., "started": "...Z", "scope": ...}`. Scope/session/resource
+  strings must be encoded or hashed before becoming filenames.
 - Algorithm:
   1. If the module already holds this scope in this process → return
      (re-entrancy — critical when a library acquires on every mutating call).
-  2. If the lockfile exists: parse it, `os.kill(pid, 0)` to probe liveness.
-     - PID alive and not ours → **`SystemExit(1)`** with a message that names
-       the PID, its start time, and says: *stop it deliberately
-       (`kill <pid>`), never start a parallel run to "fix" a stuck one.*
-     - PID dead / file unparsable → stale; fall through and take over. Print
-       one line saying so. (This is why crash recovery needs no cleanup.)
-  3. Write our own lockfile; remember it in a module-level dict; register an
-     `atexit` handler that deletes it **only if the PID inside is still ours**
-     (guards against deleting a successor's lock).
-- Escape hatch: env `RUNGUARD_DISABLE=1` makes it a no-op — for deliberate,
-  understood parallel use only.
+  2. Open the persistent lockfile and claim `fcntl.flock(fd, LOCK_EX | LOCK_NB)`.
+     - Claim succeeds → write our PID/start metadata while holding the flock.
+     - Claim fails → **`SystemExit(1)`** naming the recorded holder. Do not
+       probe or override a lock based on PID permissions.
+  3. Remember the file descriptor in a module-level dict. On `atexit`, mark it
+     released and unlock/close it; never unlink the lockfile while it is held.
+     The OS releases the flock after a crash, so the next run can claim it.
+- There is no bypass flag. Deliberate parallel work uses a separate
+  source-derived scope only after the operator confirms the sources and
+  destinations are provably disjoint.
 
 **Scope naming:** one scope per *resource*, not per script. `crm-write`,
 `sourcing`, `phone-enrich`. For parallel datasets, parameterize:
@@ -275,8 +275,9 @@ run resets `offsets={}, all=[]`.
 1. **Lock refusal:** start a worker; start the same scope again → second exits
    code 1 printing the live PID. Different scope in parallel → runs.
 2. **Re-entrancy:** same process acquires the same scope twice → no error.
-3. **Stale takeover:** write a lockfile with a dead PID (e.g. 99999999) →
-   next run prints "stale" and proceeds.
+3. **Crash recovery:** leave a persistent lockfile with a dead PID but no held
+   flock → next run claims it. Two simultaneous starts must yield exactly one
+   successful holder.
 4. **Throttle:** two processes × 10 `throttle('x', 5)` calls each, print
    timestamps → combined span ≈ (20−1)/5 s; min gap between ANY two ≥ ~0.9/rate.
 5. **Ledger→dashboard:** append events via `ledger()` while the dashboard is
