@@ -197,13 +197,17 @@ body.noside #side > :not(#sideHead){display:none}
 body.noside #sideHead{justify-content:center}
 #main{flex:1;display:flex;flex-direction:column;overflow:hidden}
 #topbar{padding:12px 20px;background:var(--panel);border-bottom:1px solid #000}
-#stats{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px}
-.chip{background:var(--card);border-radius:8px;padding:6px 14px;text-align:center}
-.chip b{font-size:19px;display:block}
-.activity{flex-basis:100%;display:grid;grid-template-columns:1.15fr 1fr 1fr .8fr;gap:10px;background:#12181f;border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+#stats{display:flex;gap:10px;flex-wrap:wrap;margin-top:8px}
+.chip{background:#1b232d;border:1px solid #26313d;border-radius:8px;padding:7px 13px;text-align:center;min-width:84px}
+.chip b{font-size:18px;display:block;line-height:1.1}
+.chip small{color:var(--dim)}
+.activity{flex-basis:100%;display:grid;grid-template-columns:1.15fr 1fr 1fr .8fr;gap:10px;background:#11171d;border:1px solid var(--line);border-left:4px solid #405064;border-radius:8px;padding:11px 13px;box-shadow:0 10px 28px rgba(0,0,0,.18)}
 .activity .k{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.06em;display:block;line-height:1.2}
-.activity .v{font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block}
-.activity.live{border-color:#28513d}.activity.stale{border-color:#5b4b22}.activity.failed{border-color:#5b2c28}.activity.done{border-color:#29455e}
+.activity .v{font-size:14px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block}
+.activity.live{border-color:#28513d;border-left-color:var(--ok)}
+.activity.stale{border-color:#5b4b22;border-left-color:var(--warn)}
+.activity.failed{border-color:#5b2c28;border-left-color:var(--err)}
+.activity.done{border-color:#29455e;border-left-color:var(--info)}
 @media(max-width:900px){.activity{grid-template-columns:1fr 1fr}.activity .v{white-space:normal}}
 #content{flex:1;overflow-y:auto;padding:14px 20px}
 h3{margin:10px 0 8px;font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.08em}
@@ -218,12 +222,16 @@ h3{margin:10px 0 8px;font-size:11px;color:var(--dim);text-transform:uppercase;le
 .card h4{margin:0 0 6px;font-size:14.5px}
 .card .row{padding:3px 0;color:var(--txt)}
 .card .row small{color:var(--dim)}
-.tablewrap{overflow:auto;max-height:calc(100vh - 150px);border-radius:10px}
-.subtabs{display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap}
-.subtab{padding:4px 12px;border-radius:7px;background:var(--card);color:var(--dim);cursor:pointer;font-size:12.5px}
-.subtab.sel{background:#2c3948;color:var(--txt)}
+.recordshell{max-height:calc(100vh - 214px);overflow:auto;border-radius:10px;background:var(--card);border:1px solid var(--line)}
+.recordshell .tablewrap{overflow:visible;max-height:none;border-radius:0}
+.tablewrap{overflow:auto;max-height:calc(100vh - 150px);border-radius:10px;background:var(--card);border:1px solid var(--line)}
+.subtabs{position:sticky;top:0;z-index:8;display:flex;gap:6px;flex-wrap:wrap;padding:8px;background:#151c24;border-bottom:1px solid var(--line)}
+.subtab{padding:5px 12px;border-radius:7px;background:#202a35;color:var(--dim);cursor:pointer;font-size:12.5px;border:1px solid transparent}
+.subtab:hover{color:var(--txt);border-color:#3a4a5e}
+.subtab.sel{background:#314052;color:var(--txt);border-color:#43566c}
 table{table-layout:fixed;border-collapse:separate;border-spacing:0;background:var(--card)}
 th{position:sticky;top:0;z-index:2;background:#242e3a;text-align:left;padding:9px 12px;font-size:11.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.recordshell th{top:43px}
 td{padding:8px 12px;border-top:1px solid var(--line);vertical-align:top;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 tr:hover td{background:#232c36}
 /* freeze the first column so it stays visible when scrolling a wide table right */
@@ -629,8 +637,9 @@ function render(){
     // a workflow step's output gets its own tab, not buried under the previous step's rows.
     if(!gorder.includes(recTab))recTab=gorder[0];
     let html='';
-    if(gorder.length>1)
-      html+='<div class=subtabs>'+gorder.map(t=>`<span class="subtab ${t===recTab?'sel':''}" onclick="setRecTab('${esc(t)}')">${esc(t)} <small>· ${groups[t].order.length}</small></span>`).join('')+'</div>';
+    const hasSubtabs=gorder.length>1;
+    if(hasSubtabs)
+      html+='<div class=recordshell><div class=subtabs>'+gorder.map(t=>`<span class="subtab ${t===recTab?'sel':''}" onclick="setRecTab('${esc(t)}')">${esc(t)} <small>· ${groups[t].order.length}</small></span>`).join('')+'</div>';
     const g=groups[recTab], cols=g.cols;
     const rowKeys=view==='attention' ? g.order.filter(k=>isAttentionRecord(g.rows[k])) : g.order;
     // categorical columns (status / source / sink / condition …) render as colored
@@ -656,7 +665,7 @@ function render(){
       rowKeys.map(k=>{const r=g.rows[k];
         return `<tr data-key="${esc(recTab+'::'+k)}" data-co="${esc(k)}" data-name="${esc(k)}">`+
           cols.map(c=>`<td data-col="${esc(recTab+'::'+c)}">${gcell(c,r[c])}${gwas(r.__prev[c])}</td>`).join('')+`</tr>`;
-      }).join('')+'</table></div>';
+      }).join('')+'</table></div>'+(hasSubtabs?'</div>':'');
     content.innerHTML=html||'<div class=empty>No records yet.</div>';
     decorateChat();
     return;
