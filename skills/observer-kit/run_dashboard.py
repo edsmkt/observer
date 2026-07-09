@@ -792,45 +792,19 @@ function render(){
   // Works for ANY workflow — not just contact enrichment. First column frozen,
   // resize/expand/scroll/chat all apply. Falls through to the enrichment table below
   // when a run has no `record` events.
-  const recEvents=attemptEvents().filter(e=>(e.event||e.action)==='record');
+  const recEvents=all.filter(e=>(e.event||e.action)==='record');
   if(recEvents.length){
     // group records by their `table` field: a multi-step workflow emits different
     // shapes at each step (companies → contacts → enriched…), each its own table.
-    const {groups,gorder}=recordGroups();
-    let html=attemptBanner()+renderRecordTable(groups,gorder,'Current attempt data');
+    const {groups,gorder}=recordGroups(all);
+    let html=renderRecordTable(groups,gorder,'');
     content.innerHTML=html||'<div class=empty>No records yet.</div>';
     decorateChat();
     return;
   }
   const progEvents=progressEvents();
   if(progEvents.length&&view!=='attention'){
-    const latestByPhase={};
-    for(const e of progEvents){
-      const phase=String(e.phase||e.checkpoint||e.event||e.action||'progress');
-      latestByPhase[phase]=e;
-    }
-    const rows=Object.values(latestByPhase).sort((a,b)=>String(a.phase||'').localeCompare(String(b.phase||'')));
-    const cols=['phase','done','total','percent','last update','note'];
-    const width={phase:260,done:100,total:100,percent:110,'last update':140,note:360};
-    const cell=(e,c)=>{
-      if(c==='percent'&&e.done!==undefined&&e.total)return Math.round((Number(e.done)/Number(e.total))*100)+'%';
-      if(c==='last update')return relAge(e.ts);
-      return fmt(e[c]);
-    };
-    const totalW=cols.reduce((s,c)=>s+width[c],0);
-    let html=attemptBanner()+
-      `<div class=card><h4>Live progress</h4><div class=row><small>No record rows have landed for this attempt yet. Showing progress events from the JSONL as they arrive.</small></div></div>`+
-      `<div class=tablewrap><table style="width:${totalW}px"><tr>${cols.map(c=>`<th data-col="progress::${esc(c)}" style="width:${width[c]}px">${esc(c)}<span class=rz></span></th>`).join('')}</tr>`+
-      rows.map(e=>`<tr data-key="${esc(e.phase||e.checkpoint||'progress')}" data-co="${esc(e.phase||'progress')}" data-name="${esc(e.phase||'progress')}">`+
-        cols.map(c=>`<td data-col="progress::${esc(c)}">${esc(cell(e,c))}</td>`).join('')+`</tr>`).join('')+
-      `</table></div>`;
-    const priorRecords=priorAttemptEvents().filter(e=>(e.event||e.action)==='record');
-    if(priorRecords.length){
-      const prior=recordGroups(priorAttemptEvents());
-      html+=renderRecordTable(prior.groups, prior.gorder, 'Earlier attempt data');
-    }
-    content.innerHTML=html;
-    decorateChat();
+    content.innerHTML='<div class=empty>No data rows yet. Progress is visible in the status strip, Timeline, and Run info.</div>';
     return;
   }
   // records: one table row per (company, person); events fold into columns
