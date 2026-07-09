@@ -206,7 +206,7 @@ is possible, use the same lock scope and run serially.
 - `runguard.py`: library to vendor next to the target script.
 - `run_dashboard.py`: standalone viewer; run one instance pointed at a ledger dir.
 - `watch_chat.py`: run-scoped watcher for dashboard notes.
-- `session-start.sh`: hook script for agent session auto-wiring (see Agent wiring section).
+- `hooks/session-start-observer.sh`: hook script for agent session auto-wiring (see Agent wiring section).
 - `observer_hook.py`: optional Claude Code hook for run-start reminders.
 - `references/pattern.md`: load only for detailed event vocabulary, dashboard behavior,
 watcher/session semantics, parallelism, or adaptation guidance.
@@ -233,7 +233,7 @@ sits idle waiting. Two pieces make it automatic:
 The hook tells the agent on every session boot that a dashboard watcher is
 active, so it knows to poll for notes without being told.
 
-Place `session-start.sh` at `.claude/hooks/session-start-observer.sh` and wire
+Place `hooks/session-start-observer.sh` at `.claude/hooks/session-start-observer.sh` and wire
 it in `.claude/settings.local.json` or `.commandcode/settings.json`:
 
 ```json
