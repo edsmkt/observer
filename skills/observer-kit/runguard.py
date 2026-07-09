@@ -73,7 +73,8 @@ def acquire_lock(name: str) -> None:
     path = _lockfile(name)
     if os.path.exists(path):
         try:
-            lock = json.load(open(path))
+            with open(path, encoding='utf-8') as fh:
+                lock = json.load(fh)
             pid = int(lock.get('pid', -1))
             if pid != os.getpid():
                 os.kill(pid, 0)  # raises if dead
@@ -85,8 +86,9 @@ def acquire_lock(name: str) -> None:
                     f"double-charges and corrupted state happen.")
         except (ProcessLookupError, PermissionError, ValueError, json.JSONDecodeError):
             pass  # stale (dead pid / unreadable) — take over; re-run is always safe
-    json.dump({'pid': os.getpid(), 'started': time.strftime('%Y-%m-%dT%H:%M:%S'),
-               'scope': name}, open(path, 'w'))
+    with open(path, 'w', encoding='utf-8') as fh:
+        json.dump({'pid': os.getpid(), 'started': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                   'scope': name}, fh)
     _held[name] = path
     atexit.register(release_lock, name)
 
@@ -95,7 +97,8 @@ def release_lock(name: str) -> None:
     path = _held.pop(name, None)
     if path and os.path.exists(path):
         try:
-            lock = json.load(open(path))
+            with open(path, encoding='utf-8') as fh:
+                lock = json.load(fh)
             if int(lock.get('pid', -1)) == os.getpid():
                 os.remove(path)
         except Exception:

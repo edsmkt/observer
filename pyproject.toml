@@ -16,3 +16,29 @@ observer-kit = "observer_kit.cli:main"
 
 [tool.setuptools]
 packages = ["observer_kit"]
+
+[tool.setuptools.data-files]
+"skills/observer-kit" = [
+  "skills/observer-kit/EXPLAIN.md",
+  "skills/observer-kit/SKILL.md",
+  "skills/observer-kit/example_worker.py",
+  "skills/observer-kit/observer_hook.py",
+  "skills/observer-kit/run_dashboard.py",
+  "skills/observer-kit/runguard.py",
+  "skills/observer-kit/sample-ledger.jsonl",
+  "skills/observer-kit/test_dashboard.py",
+  "skills/observer-kit/test_lint_emit.py",
+  "skills/observer-kit/test_runguard.py",
+  "skills/observer-kit/watch_chat.py",
+]
+"skills/observer-kit/agents" = [
+  "skills/observer-kit/agents/openai.yaml",
+]
+"skills/observer-kit/hooks" = [
+  "skills/observer-kit/hooks/session-start-observer.sh",
+]
+"skills/observer-kit/references" = [
+  "skills/observer-kit/references/build-guide.md",
+  "skills/observer-kit/references/lint_emit.py",
+  "skills/observer-kit/references/pattern.md",
+]

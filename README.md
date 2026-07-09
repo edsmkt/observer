@@ -239,6 +239,7 @@ limits; it does not prevent duplicate work on overlapping records.
 | `EXPLAIN.md` | Template for the plain-English + ASCII "statement of intent" |
 | `example_worker.py` | Runnable end-to-end example (parallel datasets + throttle) |
 | `test_runguard.py` | Acceptance tests for the safety core (lock exclusivity, stale-lock takeover, re-entrancy, scope isolation, ledger append/continuity, cross-process throttle). Run it after vendoring `runguard.py` to prove the guards hold |
+| `test_lint_emit.py`, `test_dashboard.py` | Acceptance tests for the live-emission linter and dashboard JSONL reader. `observer-kit test` runs these with the safety-core tests |
 | `references/pattern.md` | The full pattern, event vocabulary, dashboard behavior, safety rules |
 | `references/build-guide.md` | Rebuild the whole stack from scratch, with acceptance tests |
 

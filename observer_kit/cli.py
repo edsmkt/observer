@@ -13,7 +13,21 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILL_DIR = Path(os.environ.get("OBSERVER_KIT_SKILL_DIR", ROOT / "skills" / "observer-kit"))
+
+
+def _skill_dir() -> Path:
+    env_dir = os.environ.get("OBSERVER_KIT_SKILL_DIR")
+    if env_dir:
+        return Path(env_dir).expanduser().resolve()
+    candidates = [
+        ROOT / "skills" / "observer-kit",          # source checkout / editable install
+        Path(sys.prefix) / "skills" / "observer-kit",  # wheel data_files install
+        Path(sys.base_prefix) / "skills" / "observer-kit",
+    ]
+    return next((p for p in candidates if p.exists()), candidates[0])
+
+
+SKILL_DIR = _skill_dir()
 
 
 def skill_file(name: str) -> Path:
@@ -80,9 +94,16 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
 
 
 def cmd_test(args: argparse.Namespace) -> int:
-    script = skill_file("test_runguard.py")
-    cmd = [sys.executable, str(script), str(SKILL_DIR)]
-    return subprocess.call(cmd)
+    tests = [
+        [sys.executable, str(skill_file("test_runguard.py")), str(SKILL_DIR)],
+        [sys.executable, str(skill_file("test_lint_emit.py"))],
+        [sys.executable, str(skill_file("test_dashboard.py"))],
+    ]
+    for cmd in tests:
+        rc = subprocess.call(cmd)
+        if rc:
+            return rc
+    return 0
 
 
 def _chat_path(state_dir: Path) -> Path:

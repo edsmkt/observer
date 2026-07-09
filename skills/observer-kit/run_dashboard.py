@@ -131,7 +131,8 @@ def locks():
         for f in os.listdir(d):
             if f.endswith('.lock'):
                 try:
-                    lock = json.load(open(os.path.join(d, f)))
+                    with open(os.path.join(d, f), encoding='utf-8') as fh:
+                        lock = json.load(fh)
                     pid = int(lock.get('pid', -1))
                     try:
                         os.kill(pid, 0)
@@ -173,7 +174,11 @@ def read_events(run_id, offsets):
         with open(path, 'rb') as f:
             f.seek(off)
             chunk = f.read(read_limit)
-            new_offsets[path] = f.tell()
+            end = f.tell()
+            if end < size and chunk and not chunk.endswith(b'\n'):
+                chunk += f.readline()
+                end = f.tell()
+            new_offsets[path] = end
         for line in chunk.decode('utf-8', 'replace').splitlines():
             line = line.strip()
             if not line:
@@ -829,9 +834,10 @@ function render(){
   // Works for ANY workflow — not just contact enrichment. First column frozen,
   // resize/expand/scroll/chat all apply. Falls through to the enrichment table below
   // when a run has no `record` events.
-  const recEvents=all.filter(e=>(e.event||e.action)==='record');
+  const recEvents=attemptEvents().filter(e=>(e.event||e.action)==='record');
   if(recEvents.length){
-    if(all.length!==_recGroupsVer||!_recGroupsCache)_recGroupsCache=recordGroups(all),_recGroupsVer=all.length;
+    const recVer=`${latestAttemptIndex()}:${all.length}`;
+    if(recVer!==_recGroupsVer||!_recGroupsCache)_recGroupsCache=recordGroups(attemptEvents()),_recGroupsVer=recVer;
     const {groups,gorder}=_recGroupsCache;
     const html=renderRecordTable(groups,gorder,'');
     if(html!==null)content.innerHTML=html;

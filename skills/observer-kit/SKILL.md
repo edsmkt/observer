@@ -225,7 +225,8 @@ separate run so you can compare old and new results?"
 python3 references/lint_emit.py path/to/workflow.py   # exit 0 = OK, 1 = buffered-flush violation
 ```
 
-Run `python3 test_runguard.py` after changing the safety core.
+Run `observer-kit test` after changing the safety core, linter, or dashboard
+reader.
 
 ## Agent wiring: wake on dashboard feedback
 
