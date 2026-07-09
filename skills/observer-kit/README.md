@@ -103,6 +103,21 @@ custom event vocabulary, but keep this shape unless there is a real reason not
 to. If adding Observer Kit to a new risky script takes more than a few minutes,
 the wrapper is too big.
 
+## Required sample gate
+
+For anything that spends credits, scrapes in bulk, sends messages, or mutates a
+shared system, run a small dry-run sample before any full run.
+
+Default sequence:
+
+1. Build the workflow with `--dry-run`, `--limit`, and/or `--sample-size`.
+2. Run a representative sample first, usually 5-25 records.
+3. Review the dashboard for writes/skips/failures/spend/schema issues.
+4. Get explicit confirmation before the full dataset.
+5. Run the full job only through an intentional flag such as `--full-run`.
+
+Silence is not approval. If the sample exposes problems, fix and re-sample.
+
 ## Event vocabulary (what the dashboard understands)
 
 The dashboard renders any JSON events, but these names get first-class

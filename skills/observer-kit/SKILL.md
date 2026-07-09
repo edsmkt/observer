@@ -32,6 +32,26 @@ The moment a script will:
 Wire it in **before** the code spends or writes — the guardrails only help if
 they're in place first.
 
+## Required run gate: dry-run sample before full run
+
+For any workflow that spends credits, scrapes in bulk, sends messages, or mutates a
+shared system, do **not** start with the full dataset.
+
+The default operating sequence is:
+
+1. Build the script with `--dry-run`, `--limit`, and/or `--sample-size`.
+2. Run a small representative sample first (usually 5-25 records, smaller if the
+   operation is expensive or risky).
+3. Show the operator the dashboard results and summarize: what would be written,
+   what would be skipped, failures, estimated spend, and any schema concerns.
+4. Wait for explicit confirmation before running the full dataset.
+5. Only then run the full job, preferably with a hard spend/write ceiling.
+
+Treat missing confirmation as a stop. Do not infer approval from silence, and do
+not run the full dataset just because the sample succeeded. If the user explicitly
+asks to skip the sample gate, call out the risk and still keep `--dry-run` and a
+hard limit available.
+
 ## Make an existing script show live + guarded (the core — 3 moves)
 
 `runguard.py` and `run_dashboard.py` play different roles — treat them differently:
@@ -76,6 +96,17 @@ except Exception as exc:
 Use the lower-level primitives below when a script needs custom event vocabulary.
 Do not make this ceremony: if adding Observer Kit to a risky script takes more
 than a few minutes, keep the wrapper and simplify the integration.
+
+Also add a sample/full-run CLI shape by default:
+
+```bash
+python3 workflow.py --dry-run --limit 10   # sample only; review dashboard
+python3 workflow.py --limit 10             # optional live sample after approval
+python3 workflow.py --full-run             # full run only after explicit approval
+```
+
+Make `--full-run` an intentional flag, not the default. When possible, make the
+script refuse a full run unless `--full-run` is passed.
 
 **First, agree the schema with the operator — propose, don't interrogate.** The
 dashboard shows *exactly* the fields you log, so decide them together before wiring.
@@ -181,11 +212,12 @@ start the watcher yourself when you launch in the background.
   file in the state dir describing what the run will do and won't. The dashboard's
   "How it works" tab renders it so a non-technical operator can verify before any
   spend. Regenerate it when the pipeline changes. Template bundled.
-- **Sample-first — for anything that spends credits.** Run a small sample, call
+- **Sample-first is required for spend/write workflows.** Run a small sample, call
   `wait_for_feedback(run_id)` (it blocks while the operator reviews the sample in
   the dashboard and leaves notes on specific cells), adjust the script, re-sample,
-  then run the full list. Iterations show before/after (`· was X`). Reply and
-  resolve notes with `post_chat(run_id, anchor, text, resolved=True)` (badge → ✓).
+  then wait for explicit approval before the full list. Iterations show
+  before/after (`· was X`). Reply and resolve notes with
+  `post_chat(run_id, anchor, text, resolved=True)` (badge → ✓).
   A running process can't change its own code, so all real iteration happens on
   the sample; the full run polls `read_chat()` between rounds only for a STOP.
 - **Hear the operator while you're idle — start a RUN-SCOPED watcher (key for many

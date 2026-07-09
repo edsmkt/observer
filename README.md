@@ -111,6 +111,22 @@ except Exception as exc:
 Drop to `acquire_lock()` + `ledger()` only when a pipeline needs custom event
 vocabulary. The default path is meant to stay small enough to add in minutes.
 
+## Default run policy
+
+For workflows that spend credits, scrape in bulk, send messages, or write to a
+CRM/database/spreadsheet, start with a small dry-run sample and get explicit
+approval before the full run.
+
+Recommended CLI shape:
+
+```bash
+python3 workflow.py --dry-run --limit 10   # sample only; review dashboard
+python3 workflow.py --limit 10             # optional live sample after approval
+python3 workflow.py --full-run             # full run only after explicit approval
+```
+
+The full dataset should be an intentional action, not the default path.
+
 ## Install
 
 Into your user scope (available in every project you open):
