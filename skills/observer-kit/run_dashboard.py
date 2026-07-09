@@ -164,15 +164,15 @@ def read_events(run_id, offsets):
         size = os.path.getsize(path)
         if path in offsets:
             off = int(offsets.get(path, 0))
+            read_limit = EVENT_READ_BYTES
         else:
-            off = max(0, size - EVENT_READ_BYTES)
+            off = 0
+            read_limit = None
         if size < off:
             off = 0  # rotated/truncated
         with open(path, 'rb') as f:
             f.seek(off)
-            if off:
-                f.readline()  # discard partial first line from tail startup
-            chunk = f.read(EVENT_READ_BYTES)
+            chunk = f.read(read_limit)
             new_offsets[path] = f.tell()
         for line in chunk.decode('utf-8', 'replace').splitlines():
             line = line.strip()
@@ -556,10 +556,10 @@ function isAttentionRecord(r){
   }
   return false;
 }
-function recordGroups(){
+function recordGroups(events){
   const SKIP=new Set(['ts','event','action','_file','key','table']);
   const groups={}, gorder=[];
-  for(const e of attemptEvents().filter(e=>(e.event||e.action)==='record')){
+  for(const e of (events||attemptEvents()).filter(e=>(e.event||e.action)==='record')){
     const t=e.table||'records';
     if(!groups[t]){groups[t]={rows:{},order:[],cols:[]};gorder.push(t);}
     const g=groups[t];
@@ -575,6 +575,35 @@ function recordGroups(){
     }
   }
   return {groups,gorder};
+}
+function renderRecordTable(groups, gorder, label){
+  if(!gorder.length)return '';
+  const gwas=p=>p!==undefined?` <small style="color:var(--warn)">· was ${esc(fmt(p))}</small>`:'';
+  if(!gorder.includes(recTab))recTab=gorder[0];
+  const g=groups[recTab], cols=g.cols;
+  const rowKeys=view==='attention' ? g.order.filter(k=>isAttentionRecord(g.rows[k])) : g.order;
+  const cats=catColumns(g.order.map(k=>g.rows[k]), cols);
+  const gcell=(c,v)=>{
+    const disp=esc(fmt(v));
+    if(cats.has(c)&&v!=null&&v!=='')return `<span class="pill ${outcomeClass(v)||'dim'}">${disp}</span>`;
+    return disp;
+  };
+  const gbase=Object.fromEntries(cols.map(c=>[c,colW[recTab+'::'+c]??COLW_DEFAULT[c]??150]));
+  if(!cols.some(c=>colW[recTab+'::'+c]!=null)){
+    const avail=(content.clientWidth||1000)-4, sum=cols.reduce((s,c)=>s+gbase[c],0);
+    if(sum<avail){const kk=avail/sum;cols.forEach(c=>gbase[c]=Math.round(gbase[c]*kk));}
+  }
+  const gtot=cols.reduce((s,c)=>s+gbase[c],0);
+  if(view==='attention'&&!rowKeys.length)return '<div class=empty>No records need attention right now.</div>';
+  const subtabs=gorder.length>1
+    ? `<div class=subtabs>`+gorder.map(t=>`<span class="subtab ${t===recTab?'sel':''}" onclick="setRecTab('${esc(t)}')">${esc(t)} <small>· ${groups[t].order.length}</small></span>`).join('')+'</div>'
+    : '';
+  return `${label?`<div class=card><h4>${esc(label)}</h4></div>`:''}<div class=recordshell style="height:${contentViewportHeight()}px">${subtabs}`+
+    `<div class=tablewrap><table style="width:${gtot}px"><tr>${cols.map(c=>`<th data-col="${esc(recTab+'::'+c)}" style="width:${gbase[c]}px">${esc(c)}<span class=rz></span></th>`).join('')}</tr>`+
+    rowKeys.map(k=>{const r=g.rows[k];
+      return `<tr data-key="${esc(recTab+'::'+k)}" data-co="${esc(k)}" data-name="${esc(k)}">`+
+        cols.map(c=>`<td data-col="${esc(recTab+'::'+c)}">${gcell(c,r[c])}${gwas(r.__prev[c])}</td>`).join('')+`</tr>`;
+    }).join('')+'</table></div></div>';
 }
 // A column is "categorical" (worth coloring + counting) if it repeats values and
 // has few distinct ones — that targets status/source/sink columns and skips names/ids.
@@ -597,6 +626,13 @@ function humanize(e){
   switch(ev){
     case 'run_started': return {icon:'▶️',cls:'info',text:`Run started — ${e.companies??e.todo??'?'} companies`+(e.worst_case_credits?`, spend ceiling ${e.worst_case_credits} credits`:'')};
     case 'run_finished': return {icon:'🏁',cls:'info',text:`Run finished — `+Object.entries(e).filter(([k])=>!['ts','event','_file'].includes(k)).map(([k,v])=>`${k.replaceAll('_',' ')}: ${typeof v==='object'?JSON.stringify(v):v}`).join(', ')};
+    case 'progress': {
+      const phase=esc(e.phase||'progress');
+      const pct=(e.done!==undefined&&e.total)?` (${Math.round((Number(e.done)/Number(e.total))*100)}%)`:'';
+      const amount=(e.done!==undefined&&e.total!==undefined)?`${e.done} / ${e.total}`:(e.done??e.value??'updated');
+      return {icon:'↻',cls:'info',text:`${phase} — ${esc(amount)}${pct}`+(e.note?` <small>(${esc(e.note)})</small>`:'')};
+    }
+    case 'checkpoint': return {icon:'↻',cls:'info',text:`Checkpoint — ${esc(e.checkpoint||e.name||'progress')}${e.value!==undefined?`: ${esc(e.value)}`:''}`};
     case 'bc_submitted': return {icon:'📤',cls:'info',text:`Round ${e.round??'?'}: requested ${e.leads} lookup${e.leads>1?'s':''} from the provider`,detail:(e.contacts||[]).map(c=>`${c.name} (${c.company})`).join(', ')};
     case 'credits': return {icon:'💳',cls:'warn',text:`${e.provider||'Provider'} credits — used ${e.used??e.credits_consumed??'?'}${(e.left??e.credits_left)!==undefined?`, ${e.left??e.credits_left} left`:''}`};
     case 'bc_credits': return {icon:'💳',cls:'warn',text:`Provider credits — used ${e.credits_consumed??'?'}, remaining ${e.credits_left??'?'}`};
@@ -627,7 +663,13 @@ function humanize(e){
     text+= bad?` — <b class=err>FAILED (${e.status_code})</b>`:'';
     return {icon:mut?'✏️':'·',cls:bad?'err':(mut?'info':'dim'),text,technical:!mut&&!bad};
   }
-  return {icon:'·',cls:'dim',text:esc(JSON.stringify(e)),technical:true};
+  const label=esc(ev||'event');
+  const fields=Object.entries(e)
+    .filter(([k,v])=>!['ts','event','action','_file'].includes(k)&&v!==undefined&&v!==null&&typeof v!=='object')
+    .slice(0,4)
+    .map(([k,v])=>`${k.replaceAll('_',' ')}: ${esc(v)}`)
+    .join(' · ');
+  return {icon:'·',cls:'info',text:fields?`${label} — ${fields}`:label};
 }
 
 let selMeta=null;
@@ -686,7 +728,7 @@ function priorAttemptEvents(){
 function attemptBanner(){
   const n=priorAttemptEvents().length;
   return n
-    ? `<div class=card><small>Showing the latest attempt. ${n} earlier ledger event${n===1?'':'s'} remain in Timeline.</small></div>`
+    ? `<div class=card><small>Showing the latest attempt. ${n} earlier ledger event${n===1?' is':'s are'} kept in the JSONL history.</small></div>`
     : '';
 }
 
@@ -734,14 +776,14 @@ function render(){
     return;
   }
 
-  const hs=mapped.filter(x=>tech||!x.h.technical);
+  const hs=attemptMapped.filter(x=>tech||!x.h.technical);
   if(!hs.length){content.innerHTML='<div class=empty>No events yet — they appear here within ~2s of happening.</div>';return}
-  if(view==='feed'||(view==='attention'&&!all.some(e=>(e.event||e.action)==='record'))){
+  if(view==='feed'||(view==='attention'&&!attemptEvents().some(e=>(e.event||e.action)==='record'))){
     const shown=view==='attention'
       ? hs.filter(({e,h})=>h.cls==='err'||ATTENTION_RE.test(JSON.stringify(e)))
       : hs;
     if(!shown.length){content.innerHTML='<div class=empty>No attention items yet.</div>';return}
-    content.innerHTML=shown.map(({e,h})=>`<div class=line><span class=when>${(e.ts||'').slice(11,19)}</span><span>${h.icon}</span><span class=${h.cls}>${h.text}${h.detail?`<br><small style="color:var(--dim)">${esc(h.detail)}</small>`:''}</span></div>`).join('');
+    content.innerHTML=attemptBanner()+shown.map(({e,h})=>`<div class=line><span class=when>${(e.ts||'').slice(11,19)}</span><span>${h.icon}</span><span class=${h.cls}>${h.text}${h.detail?`<br><small style="color:var(--dim)">${esc(h.detail)}</small>`:''}</span></div>`).join('');
     if(autoscroll)content.scrollTop=content.scrollHeight;
     return;
   }
@@ -755,40 +797,7 @@ function render(){
     // group records by their `table` field: a multi-step workflow emits different
     // shapes at each step (companies → contacts → enriched…), each its own table.
     const {groups,gorder}=recordGroups();
-    const gwas=p=>p!==undefined?` <small style="color:var(--warn)">· was ${esc(fmt(p))}</small>`:'';
-    // one SUB-TAB per table (companies / contacts / …) instead of stacking them —
-    // a workflow step's output gets its own tab, not buried under the previous step's rows.
-    if(!gorder.includes(recTab))recTab=gorder[0];
-    let html=attemptBanner();
-    const hasSubtabs=gorder.length>1;
-    if(hasSubtabs)
-      html+=`<div class=recordshell style="height:${contentViewportHeight()}px"><div class=subtabs>`+gorder.map(t=>`<span class="subtab ${t===recTab?'sel':''}" onclick="setRecTab('${esc(t)}')">${esc(t)} <small>· ${groups[t].order.length}</small></span>`).join('')+'</div>';
-    const g=groups[recTab], cols=g.cols;
-    const rowKeys=view==='attention' ? g.order.filter(k=>isAttentionRecord(g.rows[k])) : g.order;
-    // categorical columns (status / source / sink / condition …) render as colored
-    // outcome pills; free-text/id columns stay plain. Fully data-driven.
-    const cats=catColumns(g.order.map(k=>g.rows[k]), cols);
-    const gcell=(c,v)=>{
-      const disp=esc(fmt(v));
-      if(cats.has(c)&&v!=null&&v!=='')return `<span class="pill ${outcomeClass(v)||'dim'}">${disp}</span>`;
-      return disp;
-    };
-    // width keyed by table::col so same-named cols in different tables resize independently
-    const gbase=Object.fromEntries(cols.map(c=>[c,colW[recTab+'::'+c]??COLW_DEFAULT[c]??150]));
-    if(!cols.some(c=>colW[recTab+'::'+c]!=null)){
-      const avail=(content.clientWidth||1000)-4, sum=cols.reduce((s,c)=>s+gbase[c],0);
-      if(sum<avail){const kk=avail/sum;cols.forEach(c=>gbase[c]=Math.round(gbase[c]*kk));}
-    }
-    const gtot=cols.reduce((s,c)=>s+gbase[c],0);
-    if(view==='attention'&&!rowKeys.length){
-      content.innerHTML='<div class=empty>No records need attention right now.</div>';
-      return;
-    }
-    html+=`<div class=tablewrap><table style="width:${gtot}px"><tr>${cols.map(c=>`<th data-col="${esc(recTab+'::'+c)}" style="width:${gbase[c]}px">${esc(c)}<span class=rz></span></th>`).join('')}</tr>`+
-      rowKeys.map(k=>{const r=g.rows[k];
-        return `<tr data-key="${esc(recTab+'::'+k)}" data-co="${esc(k)}" data-name="${esc(k)}">`+
-          cols.map(c=>`<td data-col="${esc(recTab+'::'+c)}">${gcell(c,r[c])}${gwas(r.__prev[c])}</td>`).join('')+`</tr>`;
-      }).join('')+'</table></div>'+(hasSubtabs?'</div>':'');
+    let html=attemptBanner()+renderRecordTable(groups,gorder,'Current attempt data');
     content.innerHTML=html||'<div class=empty>No records yet.</div>';
     decorateChat();
     return;
@@ -809,12 +818,18 @@ function render(){
       return fmt(e[c]);
     };
     const totalW=cols.reduce((s,c)=>s+width[c],0);
-    content.innerHTML=attemptBanner()+
+    let html=attemptBanner()+
       `<div class=card><h4>Live progress</h4><div class=row><small>No record rows have landed for this attempt yet. Showing progress events from the JSONL as they arrive.</small></div></div>`+
       `<div class=tablewrap><table style="width:${totalW}px"><tr>${cols.map(c=>`<th data-col="progress::${esc(c)}" style="width:${width[c]}px">${esc(c)}<span class=rz></span></th>`).join('')}</tr>`+
       rows.map(e=>`<tr data-key="${esc(e.phase||e.checkpoint||'progress')}" data-co="${esc(e.phase||'progress')}" data-name="${esc(e.phase||'progress')}">`+
         cols.map(c=>`<td data-col="progress::${esc(c)}">${esc(cell(e,c))}</td>`).join('')+`</tr>`).join('')+
       `</table></div>`;
+    const priorRecords=priorAttemptEvents().filter(e=>(e.event||e.action)==='record');
+    if(priorRecords.length){
+      const prior=recordGroups(priorAttemptEvents());
+      html+=renderRecordTable(prior.groups, prior.gorder, 'Earlier attempt data');
+    }
+    content.innerHTML=html;
     decorateChat();
     return;
   }
@@ -1022,7 +1037,9 @@ function activityStrip(flatRecords, errors){
   const recordAttention=flatRecords.filter(({row})=>isAttentionRecord(row)).length;
   const attention=flatRecords.length ? recordAttention : errors;
   const progress=started.todo
-    ? `${flatRecords.filter(({row})=>String(row.status||'').toLowerCase()==='done').length} / ${started.todo}`
+    ? (last.done!==undefined&&last.total!==undefined
+        ? `${last.done} / ${last.total}`
+        : `${flatRecords.filter(({row})=>String(row.status||'').toLowerCase()==='done').length} / ${started.todo}`)
     : flatRecords.length
       ? `${flatRecords.length} records`
       : last.done!==undefined&&last.total!==undefined
@@ -1194,7 +1211,7 @@ class Handler(BaseHTTPRequestHandler):
             except json.JSONDecodeError:
                 offsets = {}
             events, new_offsets = read_events(run_id, offsets)
-            self._json({'events': events[-500:], 'offsets': new_offsets})
+            self._json({'events': events, 'offsets': new_offsets})
         else:
             self.send_response(404)
             self.end_headers()
