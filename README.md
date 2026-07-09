@@ -2,7 +2,7 @@
 
 Guardrails and a live localhost dashboard for any script that **spends API
 credits** or **mutates shared state** (CRM, database, spreadsheets) — packaged
-as an installable [agent skill](https://github.com/vercel-labs/skills).
+as an installable agent skill.
 
 It gives batch / enrichment / scraping scripts three things, all stdlib-only,
 no dependencies:
