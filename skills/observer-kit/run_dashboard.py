@@ -222,7 +222,7 @@ h3{margin:10px 0 8px;font-size:11px;color:var(--dim);text-transform:uppercase;le
 .card h4{margin:0 0 6px;font-size:14.5px}
 .card .row{padding:3px 0;color:var(--txt)}
 .card .row small{color:var(--dim)}
-.recordshell{max-height:calc(100vh - 214px);overflow:auto;border-radius:10px;background:var(--card);border:1px solid var(--line)}
+.recordshell{height:calc(100vh - 214px);overflow:auto;border-radius:10px;background:var(--card);border:1px solid var(--line)}
 .recordshell .tablewrap{overflow:visible;max-height:none;border-radius:0}
 .tablewrap{overflow:auto;max-height:calc(100vh - 150px);border-radius:10px;background:var(--card);border:1px solid var(--line)}
 .subtabs{position:sticky;top:0;z-index:8;display:flex;gap:6px;flex-wrap:wrap;padding:8px;background:#151c24;border-bottom:1px solid var(--line)}
@@ -319,6 +319,7 @@ function setRecTab(t){recTab=t;render();}
 const COLW_DEFAULT={Company:190,Person:150,Tier:80,Phone:170,Email:230,'CRM id':120};
 try{colW=JSON.parse(localStorage.getItem('observer_colw')||'{}')}catch(e){}
 const content=document.getElementById('content');
+function contentViewportHeight(){return Math.max(260, content.clientHeight-28);}
 let autoscroll=true;
 content.addEventListener('scroll',()=>{autoscroll=content.scrollTop+content.clientHeight>content.scrollHeight-60});
 
@@ -639,7 +640,7 @@ function render(){
     let html='';
     const hasSubtabs=gorder.length>1;
     if(hasSubtabs)
-      html+='<div class=recordshell><div class=subtabs>'+gorder.map(t=>`<span class="subtab ${t===recTab?'sel':''}" onclick="setRecTab('${esc(t)}')">${esc(t)} <small>· ${groups[t].order.length}</small></span>`).join('')+'</div>';
+      html+=`<div class=recordshell style="height:${contentViewportHeight()}px"><div class=subtabs>`+gorder.map(t=>`<span class="subtab ${t===recTab?'sel':''}" onclick="setRecTab('${esc(t)}')">${esc(t)} <small>· ${groups[t].order.length}</small></span>`).join('')+'</div>';
     const g=groups[recTab], cols=g.cols;
     const rowKeys=view==='attention' ? g.order.filter(k=>isAttentionRecord(g.rows[k])) : g.order;
     // categorical columns (status / source / sink / condition …) render as colored
