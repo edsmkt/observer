@@ -49,6 +49,7 @@ if '--port' in sys.argv:
 # lines with "author":"agent". It never touches run ledgers or run state.
 CHAT_FILE = os.path.join(SOURCES['runguard'], 'chat.jsonl')
 ACTIVE_S = 120   # a file touched in the last 2 min counts as live
+EVENT_READ_BYTES = 512 * 1024
 
 
 def _first_event(path):
@@ -160,14 +161,19 @@ def read_events(run_id, offsets):
     """Incremental tail: offsets = {path: byte_offset} from the client."""
     events, new_offsets = [], {}
     for path in _files_for(run_id):
-        off = int(offsets.get(path, 0))
         size = os.path.getsize(path)
+        if path in offsets:
+            off = int(offsets.get(path, 0))
+        else:
+            off = max(0, size - EVENT_READ_BYTES)
         if size < off:
             off = 0  # rotated/truncated
         with open(path, 'rb') as f:
             f.seek(off)
-            chunk = f.read(512 * 1024)
-        new_offsets[path] = off + len(chunk)
+            if off:
+                f.readline()  # discard partial first line from tail startup
+            chunk = f.read(EVENT_READ_BYTES)
+            new_offsets[path] = f.tell()
         for line in chunk.decode('utf-8', 'replace').splitlines():
             line = line.strip()
             if not line:
