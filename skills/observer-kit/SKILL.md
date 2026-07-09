@@ -39,7 +39,7 @@ to a shared system:
 4. Wait for explicit confirmation before the full dataset.
 5. Make the full run intentional, e.g. require `--full-run`.
 
-Treat silence as no approval.
+Proceed with the full dataset after explicit confirmation.
 
 ## Preferred path
 
@@ -58,6 +58,36 @@ brain that inspects data, edits scripts, reruns, and replies.
 
 Without the CLI, vendor `runguard.py`, run `run_dashboard.py <project>/.runguard`,
 and use `watch_chat.py` when dashboard notes need to wake a harness.
+
+## Script integration contract
+
+When writing **or adapting** a workflow, first read the actual script and map:
+its real input identity, every slow work loop/pool/retry, each provider call,
+each destination mutation, and its existing resume state. Then place the
+harness on those exact paths so the dashboard reflects real work.
+
+1. Preserve the script's real CLI and business logic. Add `--dry-run`, a small
+   `--limit`/sample option, and intentional `--full-run` behavior when missing.
+2. Start one `start_observed_run(...)` around the real job with the actual
+   `source=`, chosen `progress_table=`, concise `summary_metrics`, and a
+   dashboard shape proposed before wiring it.
+3. Give every source entity a stable `table=` + `key=`. Emit that row in the
+   same loop/completion callback that actually reads, transforms, spends, or
+   writes it. Keep those ledger rows flowing as work completes.
+4. Around each external mutation, use validation/policy checks, an intent,
+   the real sink call, and a confirmed receipt that updates the same business
+   row's destination field. Keep per-sink outcomes (`appended`, `updated`,
+   `skipped`, `failed`) separate from generic local `status`.
+5. Keep the script's durable checkpoint/resume logic authoritative. Re-runs use
+   the same stable keys to update rows in place; failed items use the dead-letter
+   list rather than redoing proven-complete work.
+6. Before any full run, run the emit linter, execute a dry-run sample, inspect
+   the live dashboard against the JSONL, and wait for explicit approval.
+
+Load `references/pattern.md` for the detailed migration recipe and event/API
+examples. When the existing script needs a stable source identity or an
+incremental work loop, establish that foundation before adding the harness and
+explain the required change.
 
 ## Wrapper pattern
 
@@ -100,9 +130,45 @@ Stable `table=` and `key=` values are what let reruns update rows in place and
 show before/after values.
 
 `source=` is the preferred lock boundary for new workflows. Pass the actual
-source identity, never a mutable display label such as `csv-july`, a date, or a
-run nickname. Observer Kit derives a stable scope from it, so the same source
+source identity, such as the immutable CSV path, Sheet ID, table ID, or API
+export ID. Observer Kit derives a stable scope from it, so the same source
 refuses a second start while a genuinely separate source can run in parallel.
+
+## Moving data safely
+
+For a pipeline that creates or changes data in another system, add the relevant
+pieces, not a new orchestration layer:
+
+1. Capture `input_snapshot(...)` and pass it to `start_observed_run()`; make a
+   dry-run `run.preview(...)` before irreversible work.
+2. Use `run.validate(...)` for shape drift and `run.allow_write(...)` for consent,
+   suppression, protected fields, PII restrictions, and allowed destinations.
+3. Call `run.write_intent(...)` before a sink write and `run.write_receipt(...)`
+   only after confirmed success. Pass the ticket's `operation_key` to provider
+   idempotency support. Set `record_table=`, `outcome=`, and, when needed,
+   `outcome_field=` on the receipt so the same business row changes from
+   `pending` to `appended`/`updated`/`inserted`. Finish with `run.reconcile()`.
+4. Use `run.dead_letter(...)` / `run.replay_candidates()` for targeted recovery,
+   `run.lineage(...)` for provenance, `run.gate(...)` for batch quality checks,
+   and `run.simulate(...)` for reproducible dry-run fixtures.
+5. Call `run.check_controls()` at loop boundaries and
+   `run.check_controls(after_record=True)` after a safe write. Dashboard requests
+   wake the watcher, but the current harness/session remains the brain. Each
+   request is acknowledged once in the ledger, so a retry does not replay an old
+   pause or approval.
+
+When a `PendingWrite` or source-lock warning appears, preserve the original
+source identity and key. Reconcile the destination and record a receipt, or
+deliberately stop the named active process first. Load
+`references/pattern.md` for the full write/receipt pattern.
+
+For every confirmed external write, update the **same** `table=` + `key=` record
+with the sink's own field and outcome. For example, use
+`google_sheet='pending'` before the call and
+`google_sheet='appended'` in `write_receipt(..., record_table='accounts',
+outcome_field='google_sheet', outcome='appended')`. After a receipt, update the
+destination from `pending` to its confirmed outcome. Use `status` for the local
+step and destination columns for what landed where.
 
 ## Live observability contract
 
@@ -114,15 +180,15 @@ For every slow loop, provider batch, thread pool, scraper page, cache fill, or
 external write phase:
 
 - emit a visible `run.step(...)` row when an item starts and finishes;
-- call `run.count(...)` and `run.checkpoint(...)` inside the loop, not only at
-  the end;
+- call `run.count(...)` and `run.checkpoint(...)` inside the loop and include
+  final totals when the run closes;
 - keep output/logs unbuffered for long runs, e.g. `python3 -u` or `flush=True`;
 - if using low-level `ledger(...)`, emit progress events with stable `table=`
   and `key=` values from the same loop that spends, scrapes, or mutates.
 
 Write a row per item as it completes, and the dashboard stays live and the run
-survives a crash. If a dashboard looks stale while logs/cache files change, add
-incremental ledger emits to the script before continuing the full run.
+survives a crash. When logs or cache files advance faster than the dashboard,
+add incremental ledger emits to the relevant work loop, then continue.
 
 ### Emit records as work lands (the #1 observer-kit requirement)
 

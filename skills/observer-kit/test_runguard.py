@@ -234,7 +234,10 @@ step_exception_path = os.path.join(STATE, 'step-exception.jsonl')
 step_exception_events = [json.loads(line) for line in open(step_exception_path) if line.strip()]
 ok("step exceptions retain row failure and terminal failure",
    rc15 == 0
-   and [event.get('status') for event in step_exception_events if event.get('event') == 'record'] == ['running', 'failed']
+   and [event.get('status') for event in step_exception_events
+        if event.get('event') == 'record' and event.get('table') != 'dead_letters'] == ['running', 'failed']
+   and any(event.get('event') == 'dead_letter' and event.get('record_key') == 'bad-row'
+           for event in step_exception_events)
    and step_exception_events[-1].get('event') == 'run_failed',
    str(step_exception_events))
 

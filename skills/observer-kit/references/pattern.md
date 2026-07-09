@@ -9,6 +9,7 @@ mutate shared state (CRM, database). Give this folder to a project agent and say
 - The three pieces
 - Why it exists
 - The boring default contract
+- Adapting an existing script
 - Required sample gate
 - Event vocabulary
 - Parallel datasets and shared-API throttling
@@ -116,6 +117,112 @@ Use the lower-level `acquire_lock()` + `ledger()` primitives when a script needs
 custom event vocabulary, but keep this shape unless there is a real reason not
 to. If adding Observer Kit to a new risky script takes more than a few minutes,
 the wrapper is too big.
+
+## Adapting an existing script
+
+Do not rebuild a working pipeline around Observer Kit. Read it first and place
+the wrapper around its real inputs, actual work loops, provider calls, durable
+resume state, and sink mutations.
+
+1. Identify the immutable source identity (input path, Sheet/export ID, table
+   plus query identity), source entity key, every sink, and every loop/pool
+   where work actually completes. Use those for `source=`, `table=`, and `key=`.
+2. Preserve established CLI behavior. Add a representative `--dry-run` sample,
+   a `--limit`/sample-size, and an intentional `--full-run` gate when the script
+   spends, scrapes broadly, sends, or mutates shared data.
+3. Start `start_observed_run()` once around the real job. Move any final buffered
+   record flush into the existing item loop or `as_completed` callback so JSONL
+   reflects the work as it lands. Keep the script's actual cache/checkpoint as
+   the resume authority; log it with `run.checkpoint()`.
+4. For every destination write, use `write_intent` before the real call and
+   `write_receipt` only after confirmation. Give the receipt `record_table=`,
+   `outcome=`, and `outcome_field=` so the source entity's sink cell changes in
+   place. The separate `writes` table remains the immutable audit surface.
+5. Run `references/lint_emit.py`, exercise a dry-run sample, and compare the
+   dashboard to the actual JSONL and durable destination state before approval.
+
+Never replace real work with simulated dashboard rows, invent progress from a
+cache that has not been emitted, rename an input to bypass a lock, or use a new
+key to evade an uncertain write. If a script lacks a safe point for incremental
+emits or resumable source identity, patch that first and explain why.
+
+## Record transformation and delivery
+
+For a workflow that pulls records from one system, transforms them, and pushes
+them somewhere else, add an observed delivery boundary around the sink. This is
+optional for a read-only scraper, but is the default for CRM, spreadsheet,
+database, webhook, and file writes.
+
+```python
+from runguard import PendingWrite, RunPaused, input_snapshot, start_observed_run
+
+snapshot = input_snapshot(args.input)  # path, or remote ID + records/version
+run = start_observed_run(
+    'sync-accounts', source=args.input, input_snapshot=snapshot,
+    destination='hubspot', transform_version='v3', script=__file__,
+    dry_run=args.dry_run, todo=len(rows), progress_table='accounts')
+
+try:
+    run.preview(sample_changes, estimates={'writes': len(rows), 'credits': 0})
+    for row in rows:
+        run.check_controls()
+        output = transform(row)
+        run.validate(output, row['id'], CONTRACT)  # pauses on unknown schema by default
+        if not run.allow_write(output, row['id'], POLICY, current=row, destination='hubspot'):
+            continue
+        ticket = run.write_intent(row['id'], 'hubspot', payload=output)
+        if ticket is None or run.dry_run:  # already delivered, or preview only
+            continue
+        result = upsert_hubspot(output, idempotency_key=ticket['operation_key'])
+        run.write_receipt(ticket, result['id'], verified=True,
+                          record_table='accounts', outcome='updated',
+                          outcome_field='hubspot',
+                          lineage={'source_url': row['source_url'], 'provider': 'clearbit'})
+        run.check_controls(after_record=True)
+    run.reconcile()
+    run.success()
+except RunPaused:
+    raise
+except PendingWrite:
+    # A request may have landed before the prior process crashed. Inspect the
+    # destination and append its receipt; never create a new key to bypass this.
+    raise
+except Exception as exc:
+    run.fail(exc)
+    raise
+```
+
+The delivery vocabulary deliberately stays generic:
+
+- `input_snapshot(source, records=None, version=None)` fingerprints the reviewed
+  input without copying it into the ledger. A changed fingerprint in the same
+  lane produces `input_changed` before a resumed attempt.
+- `run.preview(samples, estimates=...)` logs a compact impact preview. Include
+  before/after/action and estimates for spend, writes, deletes, and skips.
+- `run.validate(record, key, contract)` accepts `required`, `types`, `allowed`,
+  and `unique`. `run.allow_write(...)` accepts `allowed_destinations`,
+  `required_true`, `forbidden_true`, `forbidden_fields`, `protected_fields`, and
+  an optional small project `check(record, current)` callback.
+- `run.write_intent(...)` uses a stable operation key built from record key,
+  destination, and transform revision. `run.write_receipt(...)` is the durable
+  confirmation. Give the receipt `record_table=` and an `outcome=` to update the
+  same dashboard entity row in place; its destination name is the default column
+  or `outcome_field=` can name a clearer one. A pending intent raises
+  `PendingWrite` instead of double-writing.
+- A failed `run.step(...)` is added to the dead-letter list automatically;
+  `run.dead_letter(...)` also records explicit recoverable failures with only the
+  key, error, retry number, and optional payload reference.
+  `run.replay_candidates()` returns unresolved keys after a fix. `run.lineage(...)`
+  attaches provider/source/reasoning metadata.
+- `run.gate(...)` makes a batch-level minimum/maximum check visible and pauses on
+  failure by default. `run.simulate(fixture)` loads JSON or JSONL fixture data
+  and records its fingerprint.
+
+Dashboard control buttons write durable `controls.jsonl` requests and mirror a
+short note into `chat.jsonl`, which wakes the run-scoped watcher. Workers decide
+the safe checkpoint by calling `run.check_controls()`; they are never killed by
+the dashboard. The control kinds are `pause`, `stop_after_record`, and
+`approve_full_run`. Approval is a visible operator signal, not automatic action.
 
 ## Live observability contract
 

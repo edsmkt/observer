@@ -30,6 +30,8 @@ with tempfile.TemporaryDirectory(prefix='rgdash-') as state:
     dashboard.SOURCES['runguard'] = state
     dashboard.SOURCES['push'] = os.path.join(state, 'missing-push')
     dashboard.SOURCES['enrich'] = os.path.join(state, 'missing-enrich')
+    dashboard.CHAT_FILE = os.path.join(state, 'chat.jsonl')
+    dashboard.CONTROL_FILE = os.path.join(state, 'controls.jsonl')
     dashboard.EVENT_READ_BYTES = 80
     ledger = os.path.join(state, 'large-run.jsonl')
     rows = [
@@ -95,6 +97,13 @@ with tempfile.TemporaryDirectory(prefix='rgdash-') as state:
     ok("terminal run is not marked live just because it is recent", not finished_meta.get('live'),
        str(finished_meta))
 
+    for auxiliary in ('chat.jsonl', 'controls.jsonl', 'write-sheet.receipts.jsonl'):
+        with open(os.path.join(state, auxiliary), 'w', encoding='utf-8') as fh:
+            fh.write('{"event":"record"}\n')
+    visible = {run.get('label') for run in dashboard.list_runs()}
+    ok("sidebar excludes chat, controls, and write-receipt state files",
+       not {'chat.jsonl', 'controls.jsonl', 'write-sheet.receipts.jsonl'} & visible, str(visible))
+
     # A tail read while the writer has not yet emitted its newline must retry the
     # line on the next poll instead of advancing into the middle of it.
     partial = os.path.join(state, 'partial-run.jsonl')
@@ -138,6 +147,34 @@ with tempfile.TemporaryDirectory(prefix='rgdash-') as state:
     ok("same-mode retries retain prior record rows", 'function recordWindowStart()' in dashboard.PAGE)
     ok("progress uses the source table rather than every derived row",
        'const primaryTable=started.progress_table||started.table||flatRecords[0]?.table;' in dashboard.PAGE)
+    ok("dashboard control requests use a separate durable input channel",
+       '/api/control' in dashboard.PAGE and 'CONTROL_FILE' in open(RUN_DASHBOARD, encoding='utf-8').read())
+    ok("control icons distinguish requested from acknowledged worker actions",
+       'function controlStates()' in dashboard.PAGE and 'control_acknowledged' in dashboard.PAGE and
+       "controlIcon(state.accepted?'accepted':kind)" in dashboard.PAGE)
+    ok("run monitor separates messages from control transport and only exposes useful controls",
+       "filter(m=>m.kind!=='control')" in dashboard.PAGE and
+       'function controlAvailability()' in dashboard.PAGE and
+       "summary.finished&&summary.dryRun" in dashboard.PAGE)
+    ok("table inspection stays quiet until the operator Command-clicks to message the agent",
+       "if(!ev.metaKey&&!ev.ctrlKey)return;" in dashboard.PAGE and
+       'Command/Ctrl-click = chat' in dashboard.PAGE and '[data-col]{cursor:default}' in dashboard.PAGE)
+    ok("run monitor provides a direct conversation after a pause or stop",
+       "function openRunChat()" in dashboard.PAGE and "openChat('run','Run'" in dashboard.PAGE and
+       'Message agent' in dashboard.PAGE and "!e.target.closest('.bridgeActions')" in dashboard.PAGE)
+    ok("pause and stop request worker control immediately and open chat for context",
+       'function openControlChat(kind,label,prompt)' in dashboard.PAGE and
+       'What should the agent know before ${control.prompt}?' in dashboard.PAGE and
+       'await requestControl(kind);' in dashboard.PAGE and
+       "openChat('run',label,document.getElementById('locks'),{label,prompt});" in dashboard.PAGE)
+    ok("dashboard accepts concurrent browser/API requests", 'ThreadingHTTPServer' in open(RUN_DASHBOARD, encoding='utf-8').read())
+    ok("data tables omit repeated ledger mechanics",
+       "'attempt','dry_run','operation_key','payload_sha256'" in dashboard.PAGE)
+    ok("generic tables show stable ordinals while freezing the identity column",
+       'const ROW_NUMBER_W=54;' in dashboard.PAGE and 'ordinals[key]=index+1' in dashboard.PAGE and
+       '.recordshell th.datafirst{left:54px' in dashboard.PAGE)
+    ok("generic rows render their prior value after an in-place update",
+       'const previous=row.__prev?.[c];' in dashboard.PAGE and 'was ${esc(fmt(previous))}' in dashboard.PAGE)
 
 print(f"\n{passed} passed, {failed} failed")
 raise SystemExit(1 if failed else 0)

@@ -63,7 +63,7 @@ def _sig(m):
 
 
 def _matches(m, run_id):
-    return m.get('author') == 'user' and m.get('run') == run_id
+    return (m.get('author') == 'user' or m.get('kind') == 'control') and m.get('run') == run_id
 
 
 def main():

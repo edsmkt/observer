@@ -102,6 +102,7 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
 def cmd_test(args: argparse.Namespace) -> int:
     tests = [
         [sys.executable, str(skill_file("test_runguard.py")), str(SKILL_DIR)],
+        [sys.executable, str(skill_file("test_data_movement.py")), str(SKILL_DIR)],
         [sys.executable, str(skill_file("test_lint_emit.py"))],
         [sys.executable, str(skill_file("test_dashboard.py"))],
         [sys.executable, str(skill_file("test_cli.py"))],
@@ -147,6 +148,10 @@ def _chat_signature(message: dict) -> str:
     )
 
 
+def _wakes_watcher(message: dict) -> bool:
+    return message.get("author") == "user" or message.get("kind") == "control"
+
+
 def _stream_watcher_line(line: str) -> None:
     line = line.strip()
     if not line:
@@ -172,14 +177,14 @@ def cmd_watch(args: argparse.Namespace) -> int:
         seen = set()
         if not args.include_existing:
             for message in _load_chat(chat_path):
-                if message.get("author") == "user":
+                if _wakes_watcher(message):
                     seen.add(_chat_signature(message))
         deadline = (time.time() + args.timeout) if args.timeout else None
         try:
             while True:
                 emitted = False
                 for message in _load_chat(chat_path):
-                    if message.get("author") != "user":
+                    if not _wakes_watcher(message):
                         continue
                     signature = _chat_signature(message)
                     if signature in seen:

@@ -24,8 +24,9 @@ import json
 import os
 import re
 import sys
+import threading
 import time
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 # This is a run-once GLOBAL observer, not a per-project file to vendor. Point it at
 # any project's ledger dir — no editing needed:
@@ -44,14 +45,16 @@ SOURCES = {
 PORT = int(os.environ.get('OBSERVER_PORT', '8484'))
 if '--port' in sys.argv:
     PORT = int(sys.argv[sys.argv.index('--port') + 1])
-# Inline-chat inbox: the ONLY thing this dashboard writes. Users leave notes
-# anchored to columns/cells; the agent watches this file and replies by appending
-# lines with "author":"agent". It never touches run ledgers or run state.
+# Operator requests are separate from run ledgers. Notes wake the harness; control
+# requests are durable input for a script to acknowledge at a safe checkpoint.
 CHAT_FILE = os.path.join(SOURCES['runguard'], 'chat.jsonl')
+CONTROL_FILE = os.path.join(SOURCES['runguard'], 'controls.jsonl')
 ACTIVE_S = 120   # a file touched in the last 2 min counts as live
 EVENT_READ_BYTES = 512 * 1024
 LAST_EVENT_READ_BYTES = 128 * 1024
 _SUMMARY_CACHE = {}  # path -> {identity, offset, first, latest}
+_AUXILIARY_JSONL = {'chat.jsonl', 'controls.jsonl'}
+_CONTROL_LOCK = threading.Lock()
 
 
 def _timestamp():
@@ -127,7 +130,7 @@ def _is_live_run(path, mtime, now):
     """A fresh terminal event means finished, even though the file is recent."""
     last = _last_event(path)
     event = last.get('event') or last.get('action')
-    if event in {'run_finished', 'run_failed', 'run_abandoned'}:
+    if event in {'run_finished', 'run_failed', 'run_abandoned', 'run_paused'}:
         return False
     return now - mtime < ACTIVE_S
 
@@ -164,6 +167,71 @@ def _nice_name(raw, kind):
     return scope.replace('-', ' '), f'{months[int(mo)]} {int(d)}, {h}:{mi}'
 
 
+def _is_run_ledger(filename):
+    """State side channels are JSONL too, but they are not dashboard runs."""
+    return (filename.endswith('.jsonl') and filename not in _AUXILIARY_JSONL and
+            not filename.endswith('.receipts.jsonl'))
+
+
+def _run_ledger_path(run_id):
+    """Resolve a dashboard run id to its ledger without permitting path escape."""
+    kind, sep, name = str(run_id).partition(':')
+    root = SOURCES.get(kind)
+    if not sep or not root:
+        return None
+    if kind == 'push':
+        candidate = os.path.join(root, os.path.basename(name), 'events.jsonl')
+    else:
+        candidate = os.path.join(root, os.path.basename(name))
+    root = os.path.realpath(root)
+    candidate = os.path.realpath(candidate)
+    if kind == 'push':
+        return candidate if os.path.dirname(os.path.dirname(candidate)) == root else None
+    return candidate if os.path.dirname(candidate) == root else None
+
+
+def _acknowledged_control_ids(run_id):
+    path = _run_ledger_path(run_id)
+    if not path or not os.path.isfile(path):
+        return set()
+    ids = set()
+    try:
+        with open(path, encoding='utf-8') as fh:
+            for line in fh:
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if (event.get('event') or event.get('action')) == 'control_acknowledged':
+                    control_id = event.get('control_id')
+                    if control_id:
+                        ids.add(str(control_id))
+    except OSError:
+        pass
+    return ids
+
+
+def _pending_control(run_id, kind):
+    """Return the latest unacknowledged request for this run action, if any."""
+    if not os.path.isfile(CONTROL_FILE):
+        return None
+    acknowledged = _acknowledged_control_ids(run_id)
+    pending = None
+    try:
+        with open(CONTROL_FILE, encoding='utf-8') as fh:
+            for line in fh:
+                try:
+                    control = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if control.get('run') == run_id and control.get('kind') == kind:
+                    if str(control.get('id')) not in acknowledged:
+                        pending = control
+    except OSError:
+        return None
+    return pending
+
+
 def list_runs():
     runs = []
     now = time.time()
@@ -182,7 +250,7 @@ def list_runs():
         d = SOURCES[kind]
         if os.path.isdir(d):
             for f in os.listdir(d):
-                if f.endswith('.jsonl') and f != 'chat.jsonl':
+                if _is_run_ledger(f):
                     p = os.path.join(d, f)
                     mtime = os.path.getmtime(p)
                     name, when = _nice_name(f, kind)
@@ -306,6 +374,15 @@ body.noside #brand{display:none}
 .activity.failed{border-color:#5b2c28;border-left-color:var(--err)}
 .activity.done{border-color:#29455e;border-left-color:var(--info)}
 @media(max-width:900px){.activity{grid-template-columns:1fr 1fr}.activity .v{white-space:normal}}
+@media(max-width:720px){
+  body{position:relative;min-width:0}
+  #main{min-width:0}
+  body:not(.noside) #side{position:absolute;inset:0 auto 0 0;z-index:30;width:min(320px,86vw);min-width:min(320px,86vw);box-shadow:16px 0 32px rgba(0,0,0,.42)}
+  #topbar{padding:10px;overflow-x:auto}
+  .tabs{min-width:max-content}
+  #content{padding:10px}
+  .recordshell{height:calc(100vh - 196px)}
+}
 #content{flex:1;overflow-y:auto;padding:14px 20px}
 h3{margin:10px 0 8px;font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.08em}
 .bridge{background:#111820;border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:14px}
@@ -324,6 +401,16 @@ h3{margin:10px 0 8px;font-size:11px;color:var(--dim);text-transform:uppercase;le
 .bridgeNote{margin-top:9px;color:var(--dim);font-size:12px;line-height:1.35}
 .bridgeNote b{color:var(--txt)}
 .bridgeLock{margin-top:8px;border-top:1px solid var(--line);padding-top:8px}
+.bridgeActions{display:flex;gap:6px;flex-wrap:wrap;margin-top:9px}
+.controlBtn{height:32px;display:inline-flex;align-items:center;gap:6px;padding:0 10px;background:#17202a;color:var(--dim);border:1px solid #334151;border-radius:7px;cursor:pointer;font-size:12px;font-weight:650}
+.controlBtn:hover{color:var(--txt);background:#273441;border-color:#4b6178}
+.controlBtn.warn:hover{color:var(--warn);border-color:#6a5525}
+.controlBtn.requested{color:var(--warn);border-color:#6a5525}
+.controlBtn.accepted{color:var(--ok);background:#1d3a2b;border-color:#356b4e}
+.controlBtn:disabled{cursor:default;opacity:.82}
+.controlBtn svg{width:16px;height:16px;display:block}
+.controlState{margin-top:7px;color:var(--warn);font-size:11.5px}
+.controlState .accepted{color:var(--ok)}
 .run{padding:7px 10px;border-radius:7px;cursor:pointer;margin-bottom:4px;font-size:12.5px}
 .run:hover{background:#242e39}.run.sel{background:#2c3948}
 .run small{color:var(--dim);display:block}
@@ -351,6 +438,11 @@ tr:hover td{background:#232c36}
 th:first-child{left:0;z-index:3}
 td:first-child{position:sticky;left:0;z-index:1;background:var(--card)}
 tr:hover td:first-child{background:#232c36}
+/* Generic tables keep both the ordinal and the real row identity in view. */
+.recordshell th.rownum,.recordshell td.rownum{width:54px;min-width:54px;max-width:54px;text-align:right;color:var(--dim);font-variant-numeric:tabular-nums}
+.recordshell th.datafirst{left:54px;z-index:3}
+.recordshell td.datafirst{position:sticky;left:54px;z-index:1;background:var(--card)}
+.recordshell tr:hover td.datafirst{background:#232c36}
 /* drag handle on the right edge of each header cell to resize its column */
 .rz{position:absolute;top:0;right:0;width:7px;height:100%;cursor:col-resize}
 .rz:hover{background:#3a4a5e}
@@ -375,7 +467,7 @@ input[type=text]{width:100%;background:#0d1114;color:var(--txt);border:1px solid
 .explain p{margin:8px 0}.explain ul{margin:6px 0 6px 18px}.explain li{margin:3px 0}
 .explain code{background:#0d1114;padding:1px 5px;border-radius:4px;font-size:12.5px}
 pre.diagram{background:#0d1114;border:1px solid var(--line);border-radius:8px;padding:12px;overflow-x:auto;font:12.5px/1.45 ui-monospace,Menlo,monospace;color:var(--txt);white-space:pre}
-[data-col]{cursor:pointer}
+[data-col]{cursor:default}
 th[data-col]:hover,td[data-col]:hover{outline:1px solid #34506e;outline-offset:-1px}
 .chatdot{margin-left:6px;font-size:10px;opacity:.85}
 .chatdot.resolved{color:var(--ok);opacity:1}
@@ -391,7 +483,7 @@ th[data-col]:hover,td[data-col]:hover{outline:1px solid #34506e;outline-offset:-
 </style>
 <div id=side>
   <div id=sideHead>
-    <div id=brand><div id=brandMark></div><div><div id=brandName>Observer Kit</div><div id=brandSub>review bridge</div></div></div>
+    <div id=brand><div id=brandMark></div><div><div id=brandName>Observer Kit</div><div id=brandSub>run monitor</div></div></div>
     <button id=sideToggle onclick="toggleSide()" title="Collapse sidebar" aria-label="Collapse sidebar"></button>
   </div>
   <h3>Agent bridge</h3><div id=locks class=bridge></div>
@@ -417,7 +509,7 @@ th[data-col]:hover,td[data-col]:hover{outline:1px solid #34506e;outline-offset:-
   <textarea id=chatinput placeholder="Tell the agent what to change here… (Enter to send, Shift+Enter = newline)" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChat();}"></textarea>
   <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px">
     <button class=chatbtn onclick="closeChat()">Close</button>
-    <button class="chatbtn primary" onclick="sendChat()">Send to agent</button>
+    <button id=chatSend class="chatbtn primary" onclick="sendChat()">Send to agent</button>
   </div>
 </div>
 <div id=cellmodal onclick="if(event.target.id==='cellmodal')closeCellModal()">
@@ -428,7 +520,7 @@ th[data-col]:hover,td[data-col]:hover{outline:1px solid #34506e;outline-offset:-
   </div>
 </div>
 <script>
-let sel=null, offsets={}, all=[], view='records', chatByAnchor={}, chatOpenAnchor=null, colW={}, recTab=null, currentLocks=[], _buildAbort=null;
+let sel=null, offsets={}, all=[], view='records', chatByAnchor={}, chatOpenAnchor=null, pendingControl=null, controls=[], colW={}, recTab=null, currentLocks=[], _buildAbort=null;
 let _eventCount=-1, _lastView=null, _lastSel=null, _lastRecTab=null, _recGroupsCache=null, _recGroupsVer=0;
 const ATTENTION_RE=/(fail|error|refus|reject|timeout|exception|invalid|denied|blocked|stuck|\b[45]\d\d\b)/i;
 function setRecTab(t){recTab=t;render();}
@@ -439,9 +531,9 @@ function contentViewportHeight(){return Math.max(260, content.clientHeight-28);}
 let autoscroll=true;
 content.addEventListener('scroll',()=>{autoscroll=content.scrollTop+content.clientHeight>content.scrollHeight-60});
 
-// --- inline chat (v2): click any column header or cell to leave the agent a note ---
-// Writes to a file-drop inbox the agent watches (POST /api/chat). The dashboard
-// never touches run data — the ONLY thing it writes is chat messages.
+// --- inline chat (v2): Command-click a column header or cell to leave an agent note ---
+// Chat and durable control requests are side channels. The dashboard never
+// writes the run ledger or alters a worker directly.
 function anchorFor(cell){
   const col=cell.dataset.col; if(!col)return null;
   if(cell.tagName==='TH')return 'col:'+col;
@@ -452,24 +544,38 @@ function labelFor(cell){
   if(cell.tagName==='TH')return 'Column · '+col;
   const tr=cell.closest('tr'); const nm=(tr&&(tr.dataset.name||tr.dataset.co))||''; return (nm?nm+' · ':'')+col;
 }
-function openChat(anchor,label,el){
+function openChat(anchor,label,el,control=null){
+  pendingControl=control;
   chatOpenAnchor=anchor;
   const pop=document.getElementById('chatpop'), r=el.getBoundingClientRect();
   pop.style.display='block';
   pop.style.left=Math.max(8,Math.min(r.left,window.innerWidth-336))+'px';
   pop.style.top=Math.max(8,Math.min(r.bottom+6,window.innerHeight-300))+'px';
-  document.getElementById('chatpopHead').textContent='💬 '+label;
+  document.getElementById('chatpopHead').textContent='💬 '+(control?control.label:label);
   renderThread(true);
-  const ti=document.getElementById('chatinput'); ti.value=''; ti.focus();
+  const ti=document.getElementById('chatinput');
+  ti.value='';
+  ti.placeholder=control?`What should the agent know before ${control.prompt}?`:'Tell the agent what to change here… (Enter to send, Shift+Enter = newline)';
+  document.getElementById('chatSend').textContent=control?control.label:'Send to agent';
+  ti.focus();
 }
-function closeChat(){chatOpenAnchor=null;document.getElementById('chatpop').style.display='none';}
+function openRunChat(){
+  if(!sel)return;
+  openChat('run','Run',document.getElementById('locks'));
+}
+async function openControlChat(kind,label,prompt){
+  if(!sel||!controlAvailability()[kind])return;
+  await requestControl(kind);
+  openChat('run',label,document.getElementById('locks'),{label,prompt});
+}
+function closeChat(){chatOpenAnchor=null;pendingControl=null;document.getElementById('chatpop').style.display='none';}
 function renderThread(forceBottom){
   const t=document.getElementById('chatthread');
   // only snap to the newest if you were already at the bottom; otherwise keep
   // your scroll position so you can read earlier messages while polls come in.
   const atBottom=t.scrollHeight-t.scrollTop-t.clientHeight<40;
   const prev=t.scrollTop;
-  const msgs=chatByAnchor[chatOpenAnchor]||[];
+  const msgs=(chatByAnchor[chatOpenAnchor]||[]).filter(m=>m.kind!=='control');
   t.innerHTML=msgs.length
     ?msgs.map(m=>`<div class="msg ${m.author==='agent'?'agent':'user'}"><b>${m.author==='agent'?'agent':'you'}</b> <small style="color:var(--dim)">${(m.ts||'').slice(11,16)}</small>${m.resolved?' <small style="color:var(--ok)">✓ resolved</small>':''}<div>${esc(m.text)}</div></div>`).join('')
     :'<div style="color:var(--dim);font-size:12.5px">No notes here yet. Tell the agent what to change — it watches for your messages and can reply.</div>';
@@ -479,8 +585,17 @@ async function sendChat(){
   const ti=document.getElementById('chatinput'), text=ti.value.trim();
   if(!text||!sel||!chatOpenAnchor)return;
   ti.value='';
-  try{await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({run:sel,anchor:chatOpenAnchor,text})});}catch(e){}
-  await loadChat();
+  const control=pendingControl;
+  try{
+    if(control){
+      await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({run:sel,anchor:'run',text:`${control.label}: ${text}`})});
+      await loadChat();
+      closeChat();
+    }else{
+      await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({run:sel,anchor:chatOpenAnchor,text})});
+      await loadChat();
+    }
+  }catch(e){}
 }
 async function loadChat(){
   if(!sel){chatByAnchor={};return;}
@@ -491,6 +606,24 @@ async function loadChat(){
   renderBridge();
   decorateChat();
   if(chatOpenAnchor)renderThread();
+}
+async function loadControls(){
+  if(!sel){controls=[];return;}
+  try{controls=await (await fetch('/api/control?run='+encodeURIComponent(sel))).json();}catch(e){controls=[];}
+}
+function controlIcon(kind){
+  if(kind==='pause')return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14M16 5v14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg>';
+  if(kind==='stop_after_record')return '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5" fill="currentColor"/></svg>';
+  if(kind==='accepted')return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>';
+}
+async function requestControl(kind,note='',notify=true){
+  if(!sel||!controlAvailability()[kind])return;
+  try{
+    await fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({run:sel,kind,note,notify})});
+    await Promise.all([loadControls(),loadChat()]);
+    renderBridge();
+  }catch(e){}
 }
 function decorateChat(){
   content.querySelectorAll('[data-col]').forEach(cell=>{
@@ -503,18 +636,17 @@ function decorateChat(){
     cell.appendChild(b);
   });
 }
-// single click = chat · double click = expand full cell · drag header edge = resize column
-let clickTimer=null;
+// Command/Ctrl-click = chat · double click = expand full cell · drag header edge = resize column
 content.addEventListener('click',ev=>{
   if(ev.target.closest('.rz'))return;
+  if(!ev.metaKey&&!ev.ctrlKey)return;
   const cell=ev.target.closest('[data-col]'); if(!cell)return;
   const a=anchorFor(cell); if(!a)return;
-  clearTimeout(clickTimer);
-  clickTimer=setTimeout(()=>openChat(a,labelFor(cell),cell),220);
+  ev.preventDefault();
+  openChat(a,labelFor(cell),cell);
 });
 content.addEventListener('dblclick',ev=>{
   const cell=ev.target.closest('td[data-col]'); if(!cell)return;
-  clearTimeout(clickTimer);
   openCellModal(cell);
 });
 let rz=null;
@@ -542,7 +674,7 @@ function openCellModal(cell){
 function closeCellModal(){document.getElementById('cellmodal').classList.remove('show');}
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeCellModal();});
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeChat();});
-document.addEventListener('click',e=>{const pop=document.getElementById('chatpop');if(pop.style.display==='block'&&!pop.contains(e.target)&&!e.target.closest('[data-col]'))closeChat();});
+document.addEventListener('click',e=>{const pop=document.getElementById('chatpop');if(pop.style.display==='block'&&!pop.contains(e.target)&&!e.target.closest('[data-col]')&&!e.target.closest('.bridgeActions'))closeChat();});
 
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function hasOwn(obj,key){return Object.prototype.hasOwnProperty.call(obj,key)}
@@ -583,43 +715,73 @@ function flatChat(){
   return Object.entries(chatByAnchor).flatMap(([anchor,msgs])=>msgs.map(m=>Object.assign({anchor},m)));
 }
 function bridgeSummary(){
-  if(!sel)return {title:'No run selected',desc:'Pick a run to inspect its review bridge.',state:'Idle',cls:'idle'};
+  if(!sel)return {title:'No run selected',desc:'Pick a run to inspect.',state:'Idle',cls:'idle',finished:false,dryRun:false};
   const events=attemptEvents();
   const started=[...events].find(e=>(e.event||e.action)==='run_started')||{};
-  const finished=[...events].reverse().find(e=>['run_finished','run_failed','run_abandoned'].includes(e.event||e.action));
+  const finished=[...events].reverse().find(e=>['run_finished','run_failed','run_abandoned','run_paused'].includes(e.event||e.action));
   const failed=finished&&['run_failed','run_abandoned'].includes(finished.event||finished.action);
   const desc=selMeta?.desc||started.description||started.name||selMeta?.name||selMeta?.label||'';
-  if(failed)return {title:'Run needs attention',desc,state:'Failed',cls:'attn'};
-  if(finished)return {title:started.dry_run?'Dry-run sample finished':'Run finished',desc,state:'Awaiting review',cls:'done'};
-  if(currentLocks.some(l=>l.alive))return {title:'Run is writing now',desc,state:'Live write',cls:'live'};
-  return {title:'Run selected',desc,state:'Ready for review',cls:'done'};
+  const dryRun=Boolean(started.dry_run);
+  if(failed)return {title:'Run needs attention',desc,state:'Failed',cls:'attn',finished:true,dryRun};
+  if(finished&&(finished.event||finished.action)==='run_paused')return {title:'Run paused safely',desc,state:'Paused',cls:'attn',finished:true,dryRun};
+  if(finished)return {title:dryRun?'Dry-run sample finished':'Run finished',desc,state:'Finished',cls:'done',finished:true,dryRun};
+  if(currentLocks.some(l=>l.alive))return {title:'Run is writing now',desc,state:'Running',cls:'live',finished:false,dryRun};
+  return {title:'Run selected',desc,state:'Ready',cls:'done',finished:false,dryRun};
+}
+function controlAvailability(){
+  const summary=bridgeSummary();
+  const active=currentLocks.some(l=>l.alive);
+  return {pause:active,stop_after_record:active,approve_full_run:summary.finished&&summary.dryRun};
+}
+function controlStates(){
+  const latest=Object.create(null), acknowledged=new Set();
+  for(const control of controls)latest[control.kind]=control;
+  for(const event of all){
+    if(eventName(event)==='control_acknowledged'&&event.control_id)acknowledged.add(String(event.control_id));
+  }
+  return Object.fromEntries(['pause','stop_after_record','approve_full_run'].map(kind=>{
+    const control=latest[kind];
+    return [kind,{control,accepted:Boolean(control&&acknowledged.has(String(control.id)))}];
+  }));
 }
 function renderBridge(){
   const box=document.getElementById('locks'); if(!box)return;
-  const msgs=flatChat();
+  const msgs=flatChat().filter(m=>m.kind!=='control');
   const userNotes=msgs.filter(m=>m.author==='user');
   const unresolved=userNotes.filter(m=>!msgs.some(r=>r.author==='agent'&&r.anchor===m.anchor&&r.resolved)).length;
   const last=userNotes[userNotes.length-1];
+  const controlState=controlStates();
   const active=currentLocks.filter(l=>l.alive);
   const summary=bridgeSummary();
   const badge=active.length?'Live write':summary.state;
   const badgeCls='bridgeBadge '+(active.length?'live':summary.cls);
   const note=sel
     ? unresolved
-      ? `<b>${unresolved} open note${unresolved>1?'s':''}</b> from the dashboard. The launch command must keep the watcher bridge open for the harness to see them.`
+      ? `<b>${unresolved} message${unresolved>1?'s':''} waiting for the agent.</b> The active session receives these through its watcher.`
       : last
-        ? `Last operator note was ${esc(relAge(last.ts))}. No unresolved notes for this run.`
-        : `No operator notes yet. Click any cell or column to ask the harness to inspect it before a full run.`
-    : `Pick a run to see review notes and bridge status.`;
+        ? `Last message to the agent was ${esc(relAge(last.ts))}.`
+        : `No messages for the agent yet.`
+    : `Pick a run to see its status and messages.`;
   const lockHtml=active.length
     ? `<div class=bridgeLock>${active.map(l=>`<div class=lock><span class=live>●</span> <b>${esc(l.scope)}</b><br><small style="color:var(--dim)">process ${l.pid} · since ${esc(l.started||'?')}</small></div>`).join('')}</div>`
     : '';
+  const available=controlAvailability();
+  const controlButton=(kind,label)=>{
+    const state=controlState[kind], mode=state.accepted?'accepted':state.control?'requested':(kind==='approve_full_run'?'':'warn');
+    if(!available[kind]&&!state.accepted)return '';
+    const title=state.accepted?`${label} accepted by the worker`:state.control?`${label} requested from the worker`:`Request ${label.toLowerCase()}`;
+    const buttonLabel=state.accepted?`${label} accepted`:state.control?`${label} requested`:label;
+    const action=state.control?`requestControl('${kind}')`:(kind==='pause'?`openControlChat('pause','Pause','pausing this run')`:kind==='stop_after_record'?`openControlChat('stop_after_record','Stop after this record','stopping after this record')`:`requestControl('${kind}')`);
+    return `<button class="controlBtn ${mode}" title="${title}" aria-label="${title}" ${state.control?'disabled':''} onclick="${action}">${controlIcon(state.accepted?'accepted':kind)}<span>${buttonLabel}</span></button>`;
+  };
+  const controlsHtml=sel?[controlButton('pause','Pause'),controlButton('stop_after_record','Stop after this record'),controlButton('approve_full_run','Approve full run')].filter(Boolean).join(''):'';
+  const actions=sel?`<div class=bridgeActions><button class="chatbtn" onclick="openRunChat()">Message agent</button>${controlsHtml}</div>`:'';
   box.innerHTML=`<div class=bridgeTop><div><div class=bridgeTitle>${esc(summary.title)}</div>${summary.desc?`<div class=bridgeDesc>${esc(summary.desc)}</div>`:''}</div><span class="${badgeCls}">${badge}</span></div>
     <div class=bridgeGrid>
-      <div class=bridgeMetric><b>${active.length}</b><small>active write lock${active.length===1?'':'s'}</small></div>
-      <div class=bridgeMetric><b>${unresolved}</b><small>open review note${unresolved===1?'':'s'}</small></div>
+      <div class=bridgeMetric><b>${active.length}</b><small>active process${active.length===1?'':'es'}</small></div>
+      <div class=bridgeMetric><b>${unresolved}</b><small>message${unresolved===1?'':'s'} for agent</small></div>
     </div>
-    <div class=bridgeNote>${note}</div>${lockHtml}`;
+    <div class=bridgeNote>${note}</div>${actions}${lockHtml}`;
 }
 // Generic outcome coloring — classify a value into ok/warn/err/dim by a universal
 // vocabulary (source, sink, status, condition all read the same way). No per-workflow
@@ -629,7 +791,7 @@ function outcomeClass(v){
   if(!s||s==='—'||s==='-'||s==='n/a'||s==='na')return 'dim';
   if(/(fail|error|refus|reject|timeout|exception|invalid|denied|✗|❌|\b[45]\d\d\b)/.test(s))return 'err';
   if(/(skip|not met|not_met|excluded|exclude|held|blocked|pending|queued|searching|missing|unmatched)/.test(s))return 'warn';
-  if(/(done|ok|success|inserted|upserted|pushed|written|created|updated|added|appended|found|matched|sent|complete|synced|✓|^yes$|^true$)/.test(s))return 'ok';
+  if(/(done|ok|success|inserted|upserted|pushed|written|verified|created|updated|added|appended|found|matched|sent|complete|synced|✓|^yes$|^true$)/.test(s))return 'ok';
   return '';
 }
 function parseTs(ts){
@@ -654,7 +816,8 @@ function isAttentionRecord(r){
   return false;
 }
 function recordGroups(events){
-  const SKIP=new Set(['ts','event','action','_file','key','table','__prev']);
+  // Ledger mechanics belong in Timeline/Run info, not as repeated data columns.
+  const SKIP=new Set(['ts','event','action','_file','key','table','__prev','attempt','dry_run','operation_key','payload_sha256']);
   const groups=Object.create(null), gorder=[];
   for(const e of (events||attemptEvents()).filter(e=>(e.event||e.action)==='record')){
     const t=e.table||'records';
@@ -693,26 +856,33 @@ function renderRecordTable(groups, gorder, label){
   }
   if(!cols.length)return '<div class=empty>No populated columns for these rows yet.</div>';
   const cats=catColumns(g.order.map(k=>g.rows[k]), cols);
-  const gcell=(c,v)=>{
+  const gcell=(c,v,row)=>{
     const disp=esc(fmt(v));
-    if(cats.has(c)&&v!=null&&v!=='')return `<span class="pill ${outcomeClass(v)||'dim'}">${disp}</span>`;
-    return disp;
+    const previous=row.__prev?.[c];
+    // Status is the row's current lifecycle, while sink outcomes benefit from history.
+    const was=c!=='status'&&previous!==undefined&&previous!==v
+      ? ` <small style="color:var(--warn)">· was ${esc(fmt(previous))}</small>`:'';
+    if(cats.has(c)&&v!=null&&v!=='')return `<span class="pill ${outcomeClass(v)||'dim'}">${disp}</span>${was}`;
+    return disp+was;
   };
+  const ROW_NUMBER_W=54;
   const gbase=Object.fromEntries(cols.map(c=>[c,colW[recTab+'::'+c]??COLW_DEFAULT[c]??150]));
   if(!cols.some(c=>colW[recTab+'::'+c]!=null)){
-    const avail=(content.clientWidth||1000)-4, sum=cols.reduce((s,c)=>s+gbase[c],0);
+    const avail=(content.clientWidth||1000)-4, sum=ROW_NUMBER_W+cols.reduce((s,c)=>s+gbase[c],0);
     if(sum<avail){const kk=avail/sum;cols.forEach(c=>gbase[c]=Math.round(gbase[c]*kk));}
   }
-  const gtot=cols.reduce((s,c)=>s+gbase[c],0);
+  const gtot=ROW_NUMBER_W+cols.reduce((s,c)=>s+gbase[c],0);
   const hasSubtabs=gorder.length>1;
   const subtabs=hasSubtabs
     ? `<div class=subtabs>`+gorder.map(t=>`<span class="subtab ${t===recTab?'sel':''}" onclick="setRecTab(${esc(JSON.stringify(t))})">${esc(t)} <small>· ${groups[t].order.length}</small></span>`).join('')+'</div>'
     : '';
-  const rrow=(k)=>{const r=g.rows[k];
+  const ordinals=Object.create(null); g.order.forEach((key,index)=>{ordinals[key]=index+1;});
+  const rrow=(k)=>{const r=g.rows[k], ordinal=ordinals[k];
     return `<tr data-key="${esc(recTab+'::'+k)}" data-co="${esc(k)}" data-name="${esc(k)}">`+
-      cols.map(c=>`<td data-col="${esc(recTab+'::'+c)}">${gcell(c,r[c])}</td>`).join('')+`</tr>`;
+      `<td class=rownum>${ordinal}</td>`+
+      cols.map((c,i)=>`<td class="${i===0?'datafirst':''}" data-col="${esc(recTab+'::'+c)}">${gcell(c,r[c],r)}</td>`).join('')+`</tr>`;
   };
-  const thead=`<thead><tr>${cols.map(c=>`<th data-col="${esc(recTab+'::'+c)}" style="width:${gbase[c]}px">${esc(c)}<span class=rz></span></th>`).join('')}</tr></thead>`;
+  const thead=`<thead><tr><th class=rownum style="width:${ROW_NUMBER_W}px">#</th>${cols.map((c,i)=>`<th class="${i===0?'datafirst':''}" data-col="${esc(recTab+'::'+c)}" style="width:${gbase[c]}px">${esc(c)}<span class=rz></span></th>`).join('')}</tr></thead>`;
   // small tables (≤500 rows): build in one shot
   if(rowKeys.length<=500)
     return `${label?`<div class=card><h4>${esc(label)}</h4></div>`:''}<div class="recordshell${hasSubtabs?' hasSubtabs':''}" style="height:${contentViewportHeight()}px">${subtabs}<div class=tablewrap><table style="width:${gtot}px">${thead}<tbody>${rowKeys.map(rrow).join('')}</tbody></table></div></div>`;
@@ -757,8 +927,24 @@ function humanize(e){
   const co=e.company?` at ${esc(e.company)}`:'';
   switch(ev){
     case 'run_started': return {icon:'▶️',cls:'info',text:`Run started — ${e.companies??e.todo??'?'} companies`+(e.worst_case_credits?`, spend ceiling ${e.worst_case_credits} credits`:'')};
-    case 'run_finished': return {icon:'🏁',cls:'info',text:`Run finished — `+Object.entries(e).filter(([k])=>!['ts','event','_file'].includes(k)).map(([k,v])=>`${esc(k.replaceAll('_',' '))}: ${esc(typeof v==='object'?JSON.stringify(v):v)}`).join(', ')};
+    case 'run_finished': return {icon:'🏁',cls:'info',text:`Run finished — `+Object.entries(e).filter(([k])=>!['ts','event','_file','attempt'].includes(k)).map(([k,v])=>`${esc(k.replaceAll('_',' '))}: ${esc(typeof v==='object'?JSON.stringify(v):v)}`).join(', ')};
     case 'run_abandoned': return {icon:'⚠',cls:'err',text:`Run abandoned — ${esc(e.error||'process exited before closing the run')}`};
+    case 'run_paused': return {icon:'Ⅱ',cls:'warn',text:`Run paused safely — ${esc(e.reason||'operator or quality gate request')}`};
+    case 'run_manifest': return {icon:'•',cls:'dim',text:`Run manifest recorded${e.destination?` · destination ${esc(e.destination)}`:''}${e.transform_version?` · transform ${esc(e.transform_version)}`:''}`};
+    case 'input_changed': return {icon:'!',cls:'warn',text:'Input changed since the prior attempt — review before resuming'};
+    case 'impact_preview': return {icon:'◌',cls:'info',text:`Impact preview — ${e.sample_count??0} sample row${e.sample_count===1?'':'s'}${e.estimates?` · ${esc(JSON.stringify(e.estimates))}`:''}`};
+    case 'schema_violation': return {icon:'!',cls:'err',text:`Schema check blocked ${esc(e.key||'a record')} — ${esc((e.errors||[])[0]||'invalid data')}`};
+    case 'policy_blocked': return {icon:'!',cls:'warn',text:`Policy blocked ${esc(e.key||'a write')} — ${esc((e.errors||[])[0]||'rule failed')}`};
+    case 'quality_gate': return {icon:e.status==='failed'?'!':'✓',cls:e.status==='failed'?'warn':'ok',text:`Quality gate ${esc(e.gate||'check')} — ${esc(e.observed)}${e.status==='failed'?' (paused)':''}`};
+    case 'write_intent': return {icon:'→',cls:'info',text:`Write reserved for ${esc(e.record_key||'record')} to ${esc(e.destination||'destination')}`};
+    case 'write_preview': return {icon:'◌',cls:'info',text:`Dry-run write preview for ${esc(e.record_key||'record')} to ${esc(e.destination||'destination')}`};
+    case 'write_receipt': return {icon:'✓',cls:'ok',text:`Write ${esc(e.status||'completed')} for ${esc(e.record_key||'record')} to ${esc(e.destination||'destination')}`};
+    case 'write_skipped': return {icon:'•',cls:'warn',text:`Write skipped — ${esc(e.reason||'already recorded')}`};
+    case 'write_blocked': return {icon:'!',cls:'warn',text:`Write blocked — ${esc(e.reason||'receipt needed')}`};
+    case 'dead_letter': return {icon:'!',cls:'err',text:`Replay candidate: ${esc(e.record_key||'record')} — ${esc(e.error||'failed')}`};
+    case 'reconciliation': return {icon:'✓',cls:'info',text:`Reconciliation — ${e.written??0} written, ${e.pending??0} pending, ${e.dead_letters??0} replay candidate${e.dead_letters===1?'':'s'}`};
+    case 'control_acknowledged': return {icon:'•',cls:'info',text:`Control acknowledged — ${esc(String(e.control||'').replaceAll('_',' '))}`};
+    case 'simulation': return {icon:'◌',cls:'info',text:`Simulation fixture loaded — ${esc(e.records??0)} records`};
     case 'progress': {
       const phase=esc(e.phase||'progress');
       const pct=(e.done!==undefined&&e.total)?` (${Math.round((Number(e.done)/Number(e.total))*100)}%)`:'';
@@ -1050,7 +1236,7 @@ function renderStats(){
   const flatRecords=[];
   const tables=Object.keys(recByTable);
   const started=[...events].find(e=>(e.event||e.action)==='run_started')||{};
-  const fin=[...events].reverse().find(e=>['run_finished','run_failed','run_abandoned'].includes(e.event||e.action));
+  const fin=[...events].reverse().find(e=>['run_finished','run_failed','run_abandoned','run_paused'].includes(e.event||e.action));
   const wantedSummary=Array.isArray(started.summary_metrics)?started.summary_metrics:[];
   const pushMetric=(label,value,cls)=>{
     if(value!==undefined&&value!==null&&value!=='')chips.push([label,value,cls]);
@@ -1121,7 +1307,7 @@ function activityStrip(flatRecords, errors){
   const events=attemptEvents();
   const last=events[events.length-1]||{};
   const started=[...events].find(e=>(e.event||e.action)==='run_started')||{};
-  const finished=[...events].reverse().find(e=>['run_finished','run_failed','run_abandoned'].includes(e.event||e.action));
+  const finished=[...events].reverse().find(e=>['run_finished','run_failed','run_abandoned','run_paused'].includes(e.event||e.action));
   const dry=[...events].reverse().find(e=>e.dry_run!==undefined);
   const dryText=dry ? (dry.dry_run?'Dry run · no writes':'Live run · writes enabled') : 'Write mode unknown';
   const lastRecord=[...events].reverse().find(e=>(e.event||e.action)==='record')||{};
@@ -1130,8 +1316,8 @@ function activityStrip(flatRecords, errors){
   const stale=!finished && parseTs(last.ts) && Date.now()-parseTs(last.ts)>60000;
   let state='Waiting', cls='';
   if(finished){
-    state=['run_failed','run_abandoned'].includes(finished.event||finished.action)?'Failed':'Finished';
-    cls=state==='Failed'?'failed':'done';
+    state=['run_failed','run_abandoned'].includes(finished.event||finished.action)?'Failed':(finished.event||finished.action)==='run_paused'?'Paused':'Finished';
+    cls=state==='Failed'?'failed':state==='Paused'?'stale':'done';
   }else if(stale){
     state='Stale';
     cls='stale';
@@ -1142,6 +1328,7 @@ function activityStrip(flatRecords, errors){
   const terminalSummary=(e)=>{
     if(!e)return '';
     if(['run_failed','run_abandoned'].includes(e.event||e.action))return `Failed · ${String(e.error||'see Run info').slice(0,90)}`;
+    if((e.event||e.action)==='run_paused')return `Paused · ${String(e.reason||'safe checkpoint').slice(0,90)}`;
     const priority=['with_contacts','no_contacts','total_contacts','processed','credits_spent','errors'];
     const parts=[];
     for(const k of priority){
@@ -1221,12 +1408,13 @@ async function poll(){
       offsets=res.offsets;
       if(res.events.length){all.push(...res.events);render();}
     }
+    await loadControls();
     await loadChat();
   }catch(err){/* server restarting — retry */}
   setTimeout(poll,2000);
 }
 function pick(id,fromHash){
-  sel=id;selMeta=(window._runs||[]).find(r=>r.id===id)||null;offsets={};all=[];
+  sel=id;selMeta=(window._runs||[]).find(r=>r.id===id)||null;offsets={};all=[];controls=[];
   if(!fromHash)location.hash=encodeURIComponent(id);
   render();
 }
@@ -1243,7 +1431,7 @@ function toggleSide(){
   btn.setAttribute('aria-label',btn.title);
 }
 document.getElementById('sideToggle').innerHTML=sidebarIcon(false);
-if(localStorage.getItem('noside')){document.body.classList.add('noside');const b=document.getElementById('sideToggle');b.innerHTML=sidebarIcon(true);b.title='Expand sidebar';b.setAttribute('aria-label','Expand sidebar');}
+if(localStorage.getItem('noside')||window.innerWidth<=720){document.body.classList.add('noside');const b=document.getElementById('sideToggle');b.innerHTML=sidebarIcon(true);b.title='Expand sidebar';b.setAttribute('aria-label','Expand sidebar');}
 setBrandMark();
 renderBridge();
 render();
@@ -1267,13 +1455,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         from urllib.parse import urlparse
         u = urlparse(self.path)
+        length = int(self.headers.get('Content-Length') or 0)
+        raw = self.rfile.read(length) if length else b''
+        try:
+            data = json.loads(raw or b'{}')
+        except json.JSONDecodeError:
+            data = {}
         if u.path == '/api/chat':
-            length = int(self.headers.get('Content-Length') or 0)
-            raw = self.rfile.read(length) if length else b''
-            try:
-                data = json.loads(raw or b'{}')
-            except json.JSONDecodeError:
-                data = {}
             text = (data.get('text') or '').strip()[:2000]
             run = (data.get('run') or '')[:200]
             anchor = (data.get('anchor') or '')[:300]
@@ -1286,6 +1474,32 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({'ok': True})
             else:
                 self._json({'ok': False, 'error': 'run, anchor, text required'})
+        elif u.path == '/api/control':
+            run = str(data.get('run') or '')[:200]
+            kind = str(data.get('kind') or '')
+            note = str(data.get('note') or '').strip()[:1000]
+            notify = data.get('notify') is not False
+            if run and kind in {'pause', 'stop_after_record', 'approve_full_run'}:
+                os.makedirs(os.path.dirname(CONTROL_FILE), exist_ok=True)
+                with _CONTROL_LOCK:
+                    pending = _pending_control(run, kind)
+                    if pending:
+                        self._json({'ok': True, 'duplicate': True, 'control': pending})
+                        return
+                    rec = {'id': f'{time.time_ns():x}', 'ts': _timestamp(), 'run': run,
+                           'kind': kind, 'note': note}
+                    with open(CONTROL_FILE, 'a', encoding='utf-8') as fh:
+                        fh.write(json.dumps(rec, ensure_ascii=False) + '\n')
+                    if notify:
+                        # Control transport wakes the watcher without posing as an operator note.
+                        chat = {'ts': rec['ts'], 'run': run, 'anchor': 'run', 'author': 'system',
+                                'kind': 'control', 'control_id': rec['id'],
+                                'text': f"Control request: {kind.replace('_', ' ')}"}
+                        with open(CHAT_FILE, 'a', encoding='utf-8') as fh:
+                            fh.write(json.dumps(chat, ensure_ascii=False) + '\n')
+                self._json({'ok': True, 'control': rec})
+            else:
+                self._json({'ok': False, 'error': 'run and a supported control kind required'})
         else:
             self.send_response(404)
             self.end_headers()
@@ -1322,6 +1536,20 @@ class Handler(BaseHTTPRequestHandler):
                         if not run or m.get('run') == run:
                             msgs.append(m)
             self._json(msgs)
+        elif u.path == '/api/control':
+            q = parse_qs(u.query)
+            run = (q.get('run') or [''])[0]
+            controls = []
+            if os.path.isfile(CONTROL_FILE):
+                with open(CONTROL_FILE, encoding='utf-8') as fh:
+                    for line in fh:
+                        try:
+                            control = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if not run or control.get('run') == run:
+                            controls.append(control)
+            self._json(controls)
         elif u.path == '/api/explain':
             # Read EXPLAIN.md fresh every time (statement of intent must be current).
             found, md = False, ''
@@ -1359,4 +1587,4 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == '__main__':
     print(f'run observer → http://localhost:{PORT}')
-    HTTPServer(('127.0.0.1', PORT), Handler).serve_forever()
+    ThreadingHTTPServer(('127.0.0.1', PORT), Handler).serve_forever()

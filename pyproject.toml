@@ -26,6 +26,7 @@ packages = ["observer_kit"]
   "skills/observer-kit/run_dashboard.py",
   "skills/observer-kit/runguard.py",
   "skills/observer-kit/sample-ledger.jsonl",
+  "skills/observer-kit/test_data_movement.py",
   "skills/observer-kit/test_dashboard.py",
   "skills/observer-kit/test_cli.py",
   "skills/observer-kit/test_lint_emit.py",

@@ -15,6 +15,10 @@ no dependencies:
 - **A boring default wrapper** — `start_observed_run(...)` gives new scripts a
   run id, lock, dry-run flag, visible step rows, counters, checkpoints, and
   `success()` / `fail()` lifecycle closure without inventing a run harness.
+- **Optional delivery guardrails** — input fingerprints, impact previews,
+  declarative schema/policy checks, write intents and receipts, dead-letter
+  replay candidates, provenance, quality gates, and durable pause requests for
+  workflows that move data between systems.
 - **A read-only web dashboard** (`http://localhost:8484`) — a live per-record
   table, an at-a-glance activity strip, an Attention tab for failures/refusals,
   a plain-English timeline, a run-info tab, and a **"How it works"** tab that
@@ -111,6 +115,26 @@ except Exception as exc:
 Drop to `acquire_lock()` + `ledger()` only when a pipeline needs custom event
 vocabulary. The default path is meant to stay small enough to add in minutes.
 
+## Moving data between systems
+
+For a CRM, spreadsheet, database, API, webhook, or file sink, the wrapper can
+add only the safeguards the workflow needs: `input_snapshot(...)` before review,
+`run.preview(...)` for the sample, `run.validate(...)` / `run.allow_write(...)`
+before a mutation, then `run.write_intent(...)` and `run.write_receipt(...)`
+around the confirmed sink call. `run.reconcile()` makes intended, written,
+verified, pending, skipped, and replayable records explicit.
+
+Use `record_table=`, `outcome=`, and optionally `outcome_field=` on the receipt
+to update the same entity row in place: `google_sheet: pending` becomes
+`google_sheet: appended`, `hubspot: updated`, or another sink-specific outcome.
+
+The intent ticket contains a stable `operation_key`; pass it to a provider's
+idempotency-key feature when available. A retry with a pending prior intent
+raises `PendingWrite` rather than risk a duplicate write. Failed records stay as
+small dead-letter candidates, and the dashboard can request a pause or
+stop-after-record at a script-defined safe checkpoint. The active agent session
+remains the brain throughout.
+
 ## Default run policy
 
 For workflows that spend credits, scrape in bulk, send messages, or write to a
@@ -164,7 +188,7 @@ state-mutating batch script.
 ```bash
 git clone https://github.com/edsmkt/observer-kit
 cd observer-kit
-python3 -m observer_kit test       # verify the safety core — 15 checks, all pass
+python3 -m observer_kit test       # run the full Observer Kit acceptance suite
 python3 -m observer_kit dashboard skills/observer-kit/.runguard
 python3 skills/observer-kit/example_worker.py --table alpha
 python3 skills/observer-kit/example_worker.py --table alpha  # second copy REFUSES

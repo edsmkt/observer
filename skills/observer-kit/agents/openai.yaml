@@ -1,4 +1,4 @@
 interface:
   display_name: "Observer Kit"
   short_description: "Guarded, visible batch runs"
-  default_prompt: "Use $observer-kit to add dry-run sample gating, locks, ledgers, and a dashboard to this risky batch workflow."
+  default_prompt: "Use $observer-kit to adapt this real batch workflow with dry-run gating, locks, a live ledger, and a dashboard."

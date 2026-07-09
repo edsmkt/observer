@@ -137,6 +137,19 @@ with tempfile.TemporaryDirectory(prefix="observer-cli-") as tmp:
            "OBSERVER_CHAT_EVENT" in watch.stdout and "Please verify this row." in watch.stdout,
            watch.stdout + watch.stderr)
 
+        control = api_json(port, "/api/control", {"run": run_id, "kind": "stop_after_record"})
+        repeated_control = api_json(port, "/api/control", {"run": run_id, "kind": "stop_after_record"})
+        controls = api_json(port, f"/api/control?run={run_id}")
+        control_messages = [m for m in api_json(port, f"/api/chat?run={run_id}") if m.get("kind") == "control"]
+        control_watch = cli("watch", str(state), "--run", run_id,
+                            "--include-existing", "--timeout", "2", cwd=project)
+        ok("dashboard deduplicates control requests, keeps them out of operator notes, and wakes the watcher",
+           control.get("ok") is True and controls and controls[-1].get("kind") == "stop_after_record" and
+           repeated_control.get("duplicate") is True and len([c for c in controls if c.get("kind") == "stop_after_record"]) == 1 and
+           control_messages and control_messages[-1].get("author") == "system" and
+           "Control request: stop after record" in control_watch.stdout,
+           str(control) + str(repeated_control) + control_watch.stdout + control_watch.stderr)
+
         reply = cli("reply", str(state), "--run", run_id,
                     "--anchor", "cell:companies::acme|companies::status",
                     "--resolved", "--text", "Verified and retained.", cwd=project)
