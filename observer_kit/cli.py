@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import runpy
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 
@@ -38,6 +41,8 @@ def cmd_init(args: argparse.Namespace) -> int:
     messages = [
         copy_file(skill_file("runguard.py"), project / "runguard.py", args.force),
     ]
+    if args.watch:
+        messages.append(copy_file(skill_file("watch_chat.py"), project / "watch_chat.py", args.force))
     state_dir = (project / args.state_dir).resolve()
     state_dir.mkdir(parents=True, exist_ok=True)
     messages.append(f"ready {state_dir}")
@@ -52,6 +57,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     print()
     print("Next:")
     print(f"  observer-kit dashboard {state_dir}")
+    print(f"  observer-kit watch {state_dir} --run <run-id>")
     print("  python3 your_workflow.py --dry-run --limit 10")
     return 0
 
@@ -79,13 +85,288 @@ def cmd_test(args: argparse.Namespace) -> int:
     return subprocess.call(cmd)
 
 
+def _chat_path(state_dir: Path) -> Path:
+    return state_dir / "chat.jsonl"
+
+
+def _load_chat(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    messages = []
+    with path.open(encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                messages.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return messages
+
+
+def _chat_signature(message: dict) -> str:
+    return json.dumps(
+        [
+            message.get("ts"),
+            message.get("run"),
+            message.get("anchor"),
+            message.get("author"),
+            message.get("text"),
+        ],
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def _stream_watcher_line(line: str) -> None:
+    line = line.strip()
+    if not line:
+        return
+    try:
+        payload = json.loads(line)
+    except json.JSONDecodeError:
+        print(line, flush=True)
+        return
+    print("OBSERVER_CHAT_EVENT " + json.dumps(payload, ensure_ascii=False), flush=True)
+    run = payload.get("run", "")
+    anchor = payload.get("anchor", "")
+    text = payload.get("text", "")
+    if text:
+        print(f"[observer] dashboard note for {run} {anchor}: {text}", flush=True)
+
+
+def cmd_watch(args: argparse.Namespace) -> int:
+    state_dir = Path(args.state_dir).expanduser().resolve()
+    state_dir.mkdir(parents=True, exist_ok=True)
+    if args.all:
+        chat_path = _chat_path(state_dir)
+        seen = set()
+        if not args.include_existing:
+            for message in _load_chat(chat_path):
+                if message.get("author") == "user":
+                    seen.add(_chat_signature(message))
+        deadline = (time.time() + args.timeout) if args.timeout else None
+        try:
+            while True:
+                emitted = False
+                for message in _load_chat(chat_path):
+                    if message.get("author") != "user":
+                        continue
+                    signature = _chat_signature(message)
+                    if signature in seen:
+                        continue
+                    seen.add(signature)
+                    emitted = True
+                    _stream_watcher_line(json.dumps(message, ensure_ascii=False))
+                if deadline and time.time() > deadline:
+                    return 0
+                if not args.follow and emitted:
+                    return 0
+                time.sleep(args.poll)
+        except KeyboardInterrupt:
+            print()
+            return 130
+
+    if not args.run:
+        raise SystemExit("--run is required unless --all is set")
+    cmd = [
+        sys.executable,
+        str(skill_file("watch_chat.py")),
+        args.run,
+        "--state-dir",
+        str(state_dir),
+        "--poll",
+        str(args.poll),
+    ]
+    if args.follow:
+        cmd.append("--follow")
+    if args.timeout:
+        cmd.extend(["--timeout", str(args.timeout)])
+    if args.include_existing:
+        cmd.append("--include-existing")
+
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True)
+    assert proc.stdout is not None
+    try:
+        for line in proc.stdout:
+            _stream_watcher_line(line)
+    except KeyboardInterrupt:
+        proc.terminate()
+        return 130
+    return proc.wait()
+
+
+def cmd_reply(args: argparse.Namespace) -> int:
+    state_dir = Path(args.state_dir).expanduser().resolve()
+    state_dir.mkdir(parents=True, exist_ok=True)
+    text = args.text.strip()
+    if not text:
+        raise SystemExit("reply text is required")
+    rec = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "run": args.run,
+        "anchor": args.anchor,
+        "author": "agent",
+        "text": text,
+        "resolved": bool(args.resolved),
+    }
+    with _chat_path(state_dir).open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+    print(f"replied to {args.run} {args.anchor}")
+    return 0
+
+
+def _start_dashboard(state_dir: Path, port: int) -> subprocess.Popen:
+    return subprocess.Popen(
+        [sys.executable, str(skill_file("run_dashboard.py")), str(state_dir), "--port", str(port)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+
+
+def _start_watcher(state_dir: Path, run_id: str) -> subprocess.Popen:
+    return subprocess.Popen(
+        [
+            sys.executable,
+            str(skill_file("watch_chat.py")),
+            run_id,
+            "--state-dir",
+            str(state_dir),
+            "--follow",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    command = list(args.command)
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        raise SystemExit("usage: observer-kit run [options] -- <command> [args...]")
+
+    state_dir = Path(args.state_dir).expanduser().resolve()
+    state_dir.mkdir(parents=True, exist_ok=True)
+    dashboard_proc = None
+    watcher_proc = None
+    watcher_thread = None
+    run_id_holder = {"run_id": None}
+    lock = threading.Lock()
+
+    def ensure_watcher(run_id: str) -> None:
+        nonlocal watcher_proc, watcher_thread
+        if args.watch == "none":
+            return
+        with lock:
+            if watcher_proc is not None:
+                return
+            watcher_proc = _start_watcher(state_dir, run_id)
+            print(f"[observer] watcher connected for {run_id}", flush=True)
+            assert watcher_proc.stdout is not None
+
+            def pump_watcher() -> None:
+                assert watcher_proc is not None and watcher_proc.stdout is not None
+                for watcher_line in watcher_proc.stdout:
+                    _stream_watcher_line(watcher_line)
+
+            watcher_thread = threading.Thread(target=pump_watcher, daemon=True)
+            watcher_thread.start()
+
+    if args.dashboard:
+        dashboard_proc = _start_dashboard(state_dir, args.port)
+        print(f"[observer] dashboard: http://localhost:{args.port}/", flush=True)
+
+    env = os.environ.copy()
+    env["RUNGUARD_STATE_DIR"] = str(state_dir)
+    if args.session:
+        env["RUNGUARD_SESSION"] = (
+            time.strftime("%Y%m%d-%H%M%S") if args.session == "auto" else args.session
+        )
+    proc = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+
+    def pump_stdout() -> None:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+
+    def pump_stderr() -> None:
+        assert proc.stderr is not None
+        for line in proc.stderr:
+            if line.startswith("OBSERVER_RUN_STARTED "):
+                run_id = line.strip().split(maxsplit=1)[1]
+                run_id_holder["run_id"] = run_id
+                ensure_watcher(run_id)
+            sys.stderr.write(line)
+            sys.stderr.flush()
+
+    out_thread = threading.Thread(target=pump_stdout)
+    err_thread = threading.Thread(target=pump_stderr)
+    out_thread.start()
+    err_thread.start()
+
+    try:
+        rc = proc.wait()
+    except KeyboardInterrupt:
+        proc.terminate()
+        rc = 130
+    out_thread.join()
+    err_thread.join()
+
+    if run_id_holder["run_id"] is None and args.watch != "none":
+        print("[observer] no OBSERVER_RUN_STARTED marker was seen; watcher was not started", file=sys.stderr)
+
+    if not args.exit_after_run and (watcher_proc is not None or dashboard_proc is not None):
+        print("[observer] run exited; review bridge is still active. Press Ctrl-C to stop.", flush=True)
+        try:
+            while True:
+                if watcher_proc is not None and watcher_proc.poll() is not None:
+                    print("[observer] watcher exited", flush=True)
+                    break
+                if dashboard_proc is not None and dashboard_proc.poll() is not None:
+                    print("[observer] dashboard exited", flush=True)
+                    break
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print()
+
+    if watcher_proc is not None:
+        watcher_proc.terminate()
+        try:
+            watcher_proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            watcher_proc.kill()
+    if dashboard_proc is not None:
+        if args.keep_dashboard:
+            print(f"[observer] dashboard still running at http://localhost:{args.port}/", flush=True)
+        else:
+            dashboard_proc.terminate()
+            try:
+                dashboard_proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                dashboard_proc.kill()
+    return rc
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     project = Path(args.project).expanduser().resolve()
     checks = []
     checks.append(("project exists", project.exists()))
     checks.append(("runguard.py vendored", (project / "runguard.py").exists()))
+    checks.append(("watch_chat.py vendored", (project / "watch_chat.py").exists()))
     checks.append(("state dir exists", (project / args.state_dir).exists()))
     checks.append(("dashboard available", skill_file("run_dashboard.py").exists()))
+    checks.append(("watcher available", skill_file("watch_chat.py").exists()))
     checks.append(("tests available", skill_file("test_runguard.py").exists()))
 
     ok = True
@@ -114,12 +395,48 @@ def build_parser() -> argparse.ArgumentParser:
                       help="do not copy EXPLAIN.md into the state dir")
     init.add_argument("--no-gitignore", dest="gitignore", action="store_false",
                       help="do not write a state-dir .gitignore")
-    init.set_defaults(func=cmd_init, explain=True, gitignore=True)
+    init.add_argument("--no-watch", dest="watch", action="store_false",
+                      help="do not vendor watch_chat.py next to runguard.py")
+    init.set_defaults(func=cmd_init, explain=True, gitignore=True, watch=True)
 
     dash = sub.add_parser("dashboard", help="run the localhost dashboard")
     dash.add_argument("state_dir", nargs="?", default=".runguard", help="ledger/state directory")
     dash.add_argument("--port", type=int, default=8484, help="dashboard port")
     dash.set_defaults(func=cmd_dashboard)
+
+    watch = sub.add_parser("watch", help="bridge dashboard chat for one run to stdout")
+    watch.add_argument("state_dir", nargs="?", default=".runguard", help="ledger/state directory")
+    watch.add_argument("--run", help="run id, e.g. runguard:my-run.jsonl")
+    watch.add_argument("--all", action="store_true", help="bridge dashboard chat for all runs")
+    watch.add_argument("--poll", type=float, default=2.0, help="poll interval in seconds")
+    watch.add_argument("--follow", action="store_true", help="keep streaming dashboard notes")
+    watch.add_argument("--timeout", type=float, default=0, help="0 = wait forever")
+    watch.add_argument("--include-existing", action="store_true",
+                       help="emit existing user notes instead of only new notes")
+    watch.set_defaults(func=cmd_watch)
+
+    reply = sub.add_parser("reply", help="write an agent reply into dashboard chat")
+    reply.add_argument("state_dir", nargs="?", default=".runguard", help="ledger/state directory")
+    reply.add_argument("--run", required=True, help="run id to reply to")
+    reply.add_argument("--anchor", default="run", help="dashboard anchor/cell id")
+    reply.add_argument("--resolved", action="store_true", help="mark the note resolved")
+    reply.add_argument("--text", required=True, help="reply text")
+    reply.set_defaults(func=cmd_reply)
+
+    run = sub.add_parser("run", help="run a command with dashboard/watch plumbing")
+    run.add_argument("--state-dir", default=".runguard", help="ledger/state directory")
+    run.add_argument("--dashboard", action="store_true", help="start a dashboard for this run")
+    run.add_argument("--port", type=int, default=8484, help="dashboard port")
+    run.add_argument("--keep-dashboard", action="store_true",
+                     help="leave the dashboard process running after the command exits")
+    run.add_argument("--exit-after-run", action="store_true",
+                     help="stop dashboard/watch plumbing as soon as the command exits")
+    run.add_argument("--watch", choices=["stdout", "none"], default="stdout",
+                     help="where dashboard chat events should be bridged")
+    run.add_argument("--session", help="set RUNGUARD_SESSION; use 'auto' for a timestamped run lane")
+    run.add_argument("command", nargs=argparse.REMAINDER,
+                     help="command to run; put -- before the command")
+    run.set_defaults(func=cmd_run)
 
     test = sub.add_parser("test", help="run runguard acceptance tests")
     test.set_defaults(func=cmd_test)

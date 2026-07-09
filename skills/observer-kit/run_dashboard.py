@@ -183,18 +183,25 @@ def read_events(run_id, offsets):
 
 
 PAGE = """<!doctype html><meta charset="utf-8"><title>Run observer</title>
-<link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzMiAzMiI+PHJlY3Qgd2lkdGg9IjMyIiBoZWlnaHQ9IjMyIiByeD0iNyIgZmlsbD0iIzBmMTMxNyIvPjxnIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzU3Yzk4YSIgc3Ryb2tlLXdpZHRoPSIyLjIiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCI+PGNpcmNsZSBjeD0iMTAuNSIgY3k9IjE3IiByPSI0LjYiLz48Y2lyY2xlIGN4PSIyMS41IiBjeT0iMTciIHI9IjQuNiIvPjxwYXRoIGQ9Ik0xNS4xIDE2IGgxLjgiLz48cGF0aCBkPSJNNS45IDE1LjUgTDMuNSAxMi44Ii8+PHBhdGggZD0iTTI2LjEgMTUuNSBMMjguNSAxMi44Ii8+PC9nPjwvc3ZnPg==">
+<link id=favicon rel="icon" href="">
 <style>
 :root{--bg:#0f1317;--panel:#181e25;--card:#1e262f;--txt:#e6ebf0;--dim:#8b96a3;--ok:#57c98a;--warn:#e5b95a;--err:#e5756a;--info:#6fa8e0;--line:#28313c}
 *{box-sizing:border-box}
 body{margin:0;font:14px/1.6 -apple-system,'Segoe UI',sans-serif;background:var(--bg);color:var(--txt);display:flex;height:100vh}
 #side{width:320px;min-width:320px;overflow-y:auto;background:var(--panel);padding:14px;border-right:1px solid #000}
-#sideHead{display:flex;justify-content:flex-end;margin-bottom:2px}
-#sideToggle{background:var(--card);border:none;color:var(--dim);border-radius:7px;padding:4px 10px;cursor:pointer;font-size:13px}
-#sideToggle:hover{color:var(--txt)}
+#sideHead{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px}
+#brand{display:flex;align-items:center;gap:10px;min-width:0}
+#brandMark{width:38px;height:38px;border-radius:10px;background:#edf6ff;color:#0e1720;display:grid;place-items:center;box-shadow:0 0 0 1px rgba(255,255,255,.08),0 10px 22px rgba(0,0,0,.28)}
+#brandMark svg{width:28px;height:28px;display:block}
+#brandName{font-size:13px;font-weight:760;line-height:1.1;white-space:nowrap}
+#brandSub{font-size:11px;color:var(--dim);line-height:1.2;margin-top:2px}
+#sideToggle{width:34px;height:34px;display:grid;place-items:center;background:var(--card);border:1px solid var(--line);color:var(--dim);border-radius:8px;cursor:pointer}
+#sideToggle:hover{color:var(--txt);border-color:#405064;background:#24303c}
+#sideToggle svg{width:18px;height:18px;display:block}
 body.noside #side{width:42px;min-width:42px;padding:10px 5px;overflow:hidden}
 body.noside #side > :not(#sideHead){display:none}
 body.noside #sideHead{justify-content:center}
+body.noside #brand{display:none}
 #main{flex:1;display:flex;flex-direction:column;overflow:hidden}
 #topbar{padding:12px 20px;background:var(--panel);border-bottom:1px solid #000}
 #stats{display:flex;gap:10px;flex-wrap:wrap;margin-top:8px}
@@ -211,6 +218,22 @@ body.noside #sideHead{justify-content:center}
 @media(max-width:900px){.activity{grid-template-columns:1fr 1fr}.activity .v{white-space:normal}}
 #content{flex:1;overflow-y:auto;padding:14px 20px}
 h3{margin:10px 0 8px;font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.08em}
+.bridge{background:#111820;border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:14px}
+.bridgeTop{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:9px}
+.bridgeTitle{font-size:13px;font-weight:700;color:var(--txt)}
+.bridgeDesc{font-size:12px;color:var(--dim);line-height:1.3;margin-top:2px}
+.bridgeBadge{font-size:11px;border-radius:99px;padding:2px 8px;background:#213126;color:var(--ok);white-space:nowrap}
+.bridgeBadge.idle{background:#232b35;color:var(--dim)}
+.bridgeBadge.done{background:#1f3347;color:var(--info)}
+.bridgeBadge.live{background:#213126;color:var(--ok)}
+.bridgeBadge.attn{background:#3a331d;color:var(--warn)}
+.bridgeGrid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.bridgeMetric{background:#17202a;border:1px solid #26313d;border-radius:8px;padding:8px;min-height:58px}
+.bridgeMetric b{display:block;font-size:16px;line-height:1.15}
+.bridgeMetric small{display:block;color:var(--dim);font-size:11.5px;line-height:1.25;margin-top:3px}
+.bridgeNote{margin-top:9px;color:var(--dim);font-size:12px;line-height:1.35}
+.bridgeNote b{color:var(--txt)}
+.bridgeLock{margin-top:8px;border-top:1px solid var(--line);padding-top:8px}
 .run{padding:7px 10px;border-radius:7px;cursor:pointer;margin-bottom:4px;font-size:12.5px}
 .run:hover{background:#242e39}.run.sel{background:#2c3948}
 .run small{color:var(--dim);display:block}
@@ -277,8 +300,11 @@ th[data-col]:hover,td[data-col]:hover{outline:1px solid #34506e;outline-offset:-
 .chatbtn.primary{background:#2f6fb0;color:#fff}
 </style>
 <div id=side>
-  <div id=sideHead><button id=sideToggle onclick="toggleSide()" title="Hide/show the run list">◀</button></div>
-  <h3>Who is writing right now</h3><div id=locks class=empty>nothing running</div>
+  <div id=sideHead>
+    <div id=brand><div id=brandMark></div><div><div id=brandName>Observer Kit</div><div id=brandSub>review bridge</div></div></div>
+    <button id=sideToggle onclick="toggleSide()" title="Collapse sidebar" aria-label="Collapse sidebar"></button>
+  </div>
+  <h3>Agent bridge</h3><div id=locks class=bridge></div>
   <h3>Runs (newest first)</h3><input type=text id=q placeholder="filter…"><div id=runs></div>
 </div>
 <div id=main>
@@ -289,8 +315,7 @@ th[data-col]:hover,td[data-col]:hover{outline:1px solid #34506e;outline-offset:-
       <div class=tab id=tabFeed onclick="view='feed';render()">Timeline</div>
       <div class=tab id=tabInfo onclick="view='info';render()">Run info</div>
       <div class=tab id=tabExplain onclick="view='explain';render()">How it works</div>
-      <label title="Also show every raw HTTP request the run made (reads, polling). Failures always show, even unchecked."><input type=checkbox id=tech onchange="render()"> show raw API calls <span id=techCount style="color:var(--dim)"></span></label>
-      <span style="color:var(--dim);font-size:10.5px;align-self:center" title="observer-kit v2 — inline chat">v2</span>
+      <label id=techWrap title="Also show every raw HTTP request the run made (reads, polling). Failures always show, even unchecked." style="display:none"><input type=checkbox id=tech onchange="render()"> show raw API calls <span id=techCount style="color:var(--dim)"></span></label>
     </div>
     <div id=stats></div>
   </div>
@@ -313,7 +338,7 @@ th[data-col]:hover,td[data-col]:hover{outline:1px solid #34506e;outline-offset:-
   </div>
 </div>
 <script>
-let sel=null, offsets={}, all=[], view='records', chatByAnchor={}, chatOpenAnchor=null, colW={}, recTab=null;
+let sel=null, offsets={}, all=[], view='records', chatByAnchor={}, chatOpenAnchor=null, colW={}, recTab=null, currentLocks=[];
 const ATTENTION_RE=/(fail|error|refus|reject|timeout|exception|invalid|denied|blocked|stuck|\b[45]\d\d\b)/i;
 function setRecTab(t){recTab=t;render();}
 const COLW_DEFAULT={Company:190,Person:150,Tier:80,Phone:170,Email:230,'CRM id':120};
@@ -372,6 +397,7 @@ async function loadChat(){
     const msgs=await (await fetch('/api/chat?run='+encodeURIComponent(sel))).json();
     const by={}; for(const m of msgs){(by[m.anchor]=by[m.anchor]||[]).push(m);} chatByAnchor=by;
   }catch(e){}
+  renderBridge();
   decorateChat();
   if(chatOpenAnchor)renderThread();
 }
@@ -429,6 +455,69 @@ document.addEventListener('click',e=>{const pop=document.getElementById('chatpop
 
 function esc(s){return String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
 function fmt(v){return v===true?'✓':v===false?'—':(v==null?'':(typeof v==='object'?JSON.stringify(v):String(v)));}
+function sidebarIcon(collapsed){
+  const d=collapsed?'M10 8l4 4-4 4':'M14 8l-4 4 4 4';
+  return `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M9 5v14" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="${d}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+}
+const BRAND_MARK={
+  bg:'#edf6ff',
+  fg:'#101820',
+  accent:'#4aa3ff',
+  svg:`<svg viewBox="0 0 32 32" aria-hidden="true"><rect x="3" y="5" width="26" height="19" rx="6" fill="none" stroke="currentColor" stroke-width="2.6"/><circle cx="12" cy="15" r="4.4" fill="none" stroke="currentColor" stroke-width="2.6"/><path d="M16 15h4.8a4.8 4.8 0 1 0 0-2.8" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/><path d="M7 24l-2 3M25 24l2 3" fill="none" stroke="var(--mark-accent)" stroke-width="2.6" stroke-linecap="round"/></svg>`
+};
+function faviconHref(){
+  const m=BRAND_MARK;
+  const svg=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><style>:root{--mark-accent:${m.accent}}</style><rect width="32" height="32" rx="7" fill="${m.bg}"/><g color="${m.fg}">${m.svg.replace('<svg viewBox="0 0 32 32" aria-hidden="true">','').replace('</svg>','')}</g></svg>`;
+  return 'data:image/svg+xml,'+encodeURIComponent(svg);
+}
+function setBrandMark(){
+  const m=BRAND_MARK;
+  const box=document.getElementById('brandMark');
+  box.style.background=m.bg; box.style.color=m.fg; box.style.setProperty('--mark-accent',m.accent);
+  box.innerHTML=m.svg;
+  document.getElementById('favicon').href=faviconHref();
+}
+function flatChat(){
+  return Object.entries(chatByAnchor).flatMap(([anchor,msgs])=>msgs.map(m=>Object.assign({anchor},m)));
+}
+function bridgeSummary(){
+  if(!sel)return {title:'No run selected',desc:'Pick a run to inspect its review bridge.',state:'Idle',cls:'idle'};
+  const started=[...all].find(e=>(e.event||e.action)==='run_started')||{};
+  const finished=[...all].reverse().find(e=>['run_finished','run_failed'].includes(e.event||e.action));
+  const failed=finished&&(finished.event||finished.action)==='run_failed';
+  const desc=selMeta?.desc||started.description||started.name||selMeta?.name||selMeta?.label||'';
+  if(failed)return {title:'Run needs attention',desc,state:'Failed',cls:'attn'};
+  if(finished)return {title:started.dry_run?'Dry-run sample finished':'Run finished',desc,state:'Awaiting review',cls:'done'};
+  if(currentLocks.some(l=>l.alive))return {title:'Run is writing now',desc,state:'Live write',cls:'live'};
+  return {title:'Run selected',desc,state:'Ready for review',cls:'done'};
+}
+function renderBridge(){
+  const box=document.getElementById('locks'); if(!box)return;
+  const msgs=flatChat();
+  const userNotes=msgs.filter(m=>m.author==='user');
+  const unresolved=userNotes.filter(m=>!msgs.some(r=>r.author==='agent'&&r.anchor===m.anchor&&r.resolved)).length;
+  const last=userNotes[userNotes.length-1];
+  const active=currentLocks.filter(l=>l.alive);
+  const summary=bridgeSummary();
+  const badge=active.length?'Live write':summary.state;
+  const badgeCls='bridgeBadge '+(active.length?'live':summary.cls);
+  const note=sel
+    ? unresolved
+      ? `<b>${unresolved} open note${unresolved>1?'s':''}</b> from the dashboard. The launch command must keep the watcher bridge open for the harness to see them.`
+      : last
+        ? `Last operator note was ${esc(relAge(last.ts))}. No unresolved notes for this run.`
+        : `No operator notes yet. Click any cell or column to ask the harness to inspect it before a full run.`
+    : `Pick a run to see review notes and bridge status.`;
+  const lockHtml=active.length
+    ? `<div class=bridgeLock>${active.map(l=>`<div class=lock><span class=live>●</span> <b>${esc(l.scope)}</b><br><small style="color:var(--dim)">process ${l.pid} · since ${esc(l.started||'?')}</small></div>`).join('')}</div>`
+    : '';
+  box.innerHTML=`<div class=bridgeTop><div><div class=bridgeTitle>${esc(summary.title)}</div>${summary.desc?`<div class=bridgeDesc>${esc(summary.desc)}</div>`:''}</div><span class="${badgeCls}">${badge}</span></div>
+    <div class=bridgeGrid>
+      <div class=bridgeMetric><b>${active.length}</b><small>active write lock${active.length===1?'':'s'}</small></div>
+      <div class=bridgeMetric><b>${unresolved}</b><small>open review note${unresolved===1?'':'s'}</small></div>
+    </div>
+    <div class=bridgeNote>${note}</div>${lockHtml}`;
+}
 // Generic outcome coloring — classify a value into ok/warn/err/dim by a universal
 // vocabulary (source, sink, status, condition all read the same way). No per-workflow
 // hardcoding; returns '' for values that aren't outcome-ish (names, ids, free text).
@@ -573,11 +662,9 @@ function render(){
   const tech=document.getElementById('tech').checked;
   const mapped=all.map(e=>({e,h:humanize(e)}));
   const nTech=mapped.filter(x=>x.h.technical).length;
-  document.getElementById('techCount').textContent=
-    !sel?'(pick a run first)'
-    :nTech===0?'(none in this run)'
-    :tech?`(showing ${nTech})`
-    :`(${nTech} hidden)`;
+  const techWrap=document.getElementById('techWrap');
+  techWrap.style.display=(sel&&nTech)?'block':'none';
+  document.getElementById('techCount').textContent=tech?`(showing ${nTech})`:`(${nTech} hidden)`;
   renderStats();
 
   // How it works — a static, non-technical explainer of the whole pipeline.
@@ -757,11 +844,16 @@ function renderStats(){
   const chips=[];
   const flatRecords=[];
   const tables=Object.keys(recByTable);
+  const started=[...all].find(e=>(e.event||e.action)==='run_started')||{};
+  const fin=[...all].reverse().find(e=>(e.event||e.action)==='run_finished');
+  const wantedSummary=Array.isArray(started.summary_metrics)?started.summary_metrics:[];
+  const pushMetric=(label,value,cls)=>{
+    if(value!==undefined&&value!==null&&value!=='')chips.push([label,value,cls]);
+  };
   if(tables.length){
     for(const t of tables){
       const rows=Object.values(recByTable[t]);
       flatRecords.push(...rows.map(r=>({table:t,row:r})));
-      chips.push([t, rows.length]);   // companies, people, …
     }
     const statusCounts={running:0,done:0,failed:0,attention:0};
     for(const {row} of flatRecords){
@@ -772,15 +864,28 @@ function renderStats(){
       if(isAttentionRecord(row))statusCounts.attention++;
     }
     if(statusCounts.running)chips.push(['running',statusCounts.running,'warn']);
-    if(statusCounts.done)chips.push(['done',statusCounts.done,'ok']);
     if(statusCounts.attention)chips.push(['needs attention',statusCounts.attention,'err']);
-    // plus the engineer's own headline totals from run_finished (numeric fields only) —
-    // e.g. emails_found, total_contacts. A few final numbers, not a per-value breakdown;
-    // the colored cells carry the "what landed where" detail.
-    const fin=[...all].reverse().find(e=>(e.event||e.action)==='run_finished');
-    if(fin) for(const [k,v] of Object.entries(fin)){
-      if(['ts','event','action','_file','errors'].includes(k)||typeof v!=='number'||tables.includes(k))continue;
-      chips.push([k.replace(/_/g,' '), v, outcomeClass(k)||'ok']);
+    if(fin&&wantedSummary.length){
+      for(const item of wantedSummary){
+        const key=typeof item==='string'?item:item.key;
+        const label=typeof item==='string'?key.replace(/_/g,' '):(item.label||key.replace(/_/g,' '));
+        pushMetric(label, fin[key], item.cls||outcomeClass(key)||'ok');
+      }
+    }else if(fin){
+      const defaults=['processed','qualified','saas_true','emails_enriched','sheet_rows_appended','errors'];
+      for(const key of defaults){
+        if(fin[key]!==undefined)pushMetric(key.replace(/_/g,' '),fin[key],key==='errors'?'err':'ok');
+      }
+      if(!chips.length){
+        for(const [k,v] of Object.entries(fin)){
+          if(['ts','event','action','_file','status','dry_run','checkpoints','errors'].includes(k)||typeof v!=='number'||tables.includes(k))continue;
+          pushMetric(k.replace(/_/g,' '), v, outcomeClass(k)||'ok');
+          if(chips.length>=4)break;
+        }
+      }
+    }else{
+      const primary=recTab&&recByTable[recTab]?recTab:tables[0];
+      if(primary)pushMetric(`${primary} rows`, Object.keys(recByTable[primary]).length);
     }
   } else if(enrichRun){
     chips.push(['phones found',s.phones],['emails found',s.emails]);
@@ -862,20 +967,26 @@ function activityStrip(flatRecords, errors){
 
 async function poll(){
   try{
-    const lk=await (await fetch('/api/locks')).json();
-    document.getElementById('locks').innerHTML=lk.length?lk.map(l=>
-      `<div class=lock><span class=${l.alive?'live':'dead'}>${l.alive?'●':'○'}</span> <b>${esc(l.scope)}</b> — process ${l.pid}${l.alive?', running':' (stale, safe to ignore)'}<br><small style="color:var(--dim)">since ${esc(l.started||'?')}</small></div>`).join('')
-      :'<div class=empty style="padding:6px">nothing running</div>';
+    currentLocks=await (await fetch('/api/locks')).json();
+    renderBridge();
     const runs=await (await fetch('/api/runs')).json();
     window._runs=runs;
     const q=(document.getElementById('q').value||'').toLowerCase();
     document.getElementById('runs').innerHTML=runs.filter(r=>(r.name+r.label+(r.desc||'')).toLowerCase().includes(q)).map(r=>
       `<div class="run ${sel===r.id?'sel':''}" onclick="pick('${r.id}')"><span class=${r.live?'live':'dead'}>${r.live?'● running':'○'}</span> <b>${esc(r.name||r.label)}</b><small>${esc(r.when||'')}${r.desc?' — '+esc(r.desc):''}</small></div>`
     ).join('');
+    if(sel&&!runs.some(r=>r.id===sel)){
+      sel=null;offsets={};all=[];chatByAnchor={};selMeta=null;
+      if(runs.length)pick(runs[0].id);
+      else {location.hash='';render();}
+    }
     // deep link: restore the run named in the URL hash after the first runs load
     if(!sel&&location.hash.length>1){
       const want=decodeURIComponent(location.hash.slice(1));
       if(runs.some(r=>r.id===want))pick(want,true);
+      else if(runs.length)pick(runs[0].id);
+    }else if(!sel&&runs.length){
+      pick(runs[0].id);
     }
     if(sel){
       const res=await (await fetch('/api/events?run='+encodeURIComponent(sel)+'&offsets='+encodeURIComponent(JSON.stringify(offsets)))).json();
@@ -898,9 +1009,15 @@ window.addEventListener('hashchange',()=>{
 function toggleSide(){
   const collapsed=document.body.classList.toggle('noside');
   localStorage.setItem('noside', collapsed?'1':'');
-  document.getElementById('sideToggle').textContent=collapsed?'▶':'◀';
+  const btn=document.getElementById('sideToggle');
+  btn.innerHTML=sidebarIcon(collapsed);
+  btn.title=collapsed?'Expand sidebar':'Collapse sidebar';
+  btn.setAttribute('aria-label',btn.title);
 }
-if(localStorage.getItem('noside')){document.body.classList.add('noside');document.getElementById('sideToggle').textContent='▶';}
+document.getElementById('sideToggle').innerHTML=sidebarIcon(false);
+if(localStorage.getItem('noside')){document.body.classList.add('noside');const b=document.getElementById('sideToggle');b.innerHTML=sidebarIcon(true);b.title='Expand sidebar';b.setAttribute('aria-label','Expand sidebar');}
+setBrandMark();
+renderBridge();
 render();
 poll();
 </script>"""

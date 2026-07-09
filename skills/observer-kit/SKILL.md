@@ -98,6 +98,62 @@ python3 /path/to/observer-kit/run_dashboard.py <project>/.runguard
 
 Use `--port 8485` for a second dashboard.
 
+If the CLI is available, prefer the repeatable setup and launch path:
+
+```bash
+observer-kit init .
+observer-kit dashboard .runguard
+observer-kit run --state-dir .runguard --dashboard -- python3 workflow.py --dry-run --limit 10
+```
+
+For dashboard chat, the watcher is an I/O bridge, not the brain. The active
+harness thread/session (Codex, Claude, Goose, CommandCode, etc.) remains
+responsible for inspecting data, editing scripts, replying, and deciding what to
+rerun. The harness must run or monitor the watcher stdout for notes to wake the
+active session. Use:
+
+```bash
+observer-kit watch .runguard --run <run-id> --follow
+observer-kit watch .runguard --all --follow
+observer-kit reply .runguard --run <run-id> --anchor <anchor> --text "Handled."
+```
+
+`observer-kit run` detects the `OBSERVER_RUN_STARTED` marker and starts the
+scoped watcher automatically unless `--watch none` is passed. After the child
+workflow exits, it keeps the dashboard/watch bridge alive for sample review
+until Ctrl-C; use `--exit-after-run` only for smoke tests or noninteractive
+automation.
+
+When using a long-lived dashboard server, keep one all-run watcher attached to
+the harness:
+
+```bash
+observer-kit dashboard .runguard
+observer-kit watch .runguard --all --follow
+```
+
+That watcher emits dashboard notes for any run in the state directory, including
+completed runs the operator opens later. The event includes the run id, so the
+harness still routes replies and fixes to the correct run.
+
+For a retry after failure on the same source data, keep the same run lane: omit
+`--session`, or reuse the same stable `--session <source-id>`. Do not use
+`--session auto` for retries, because that creates a separate historical run and
+makes monitoring harder. Use `--session auto` only for intentionally new batches
+or demos where separate run history is desired.
+
+When the operator requests a script change from dashboard chat, decide the run
+lane deliberately:
+
+- If they want to fix, adapt, or continue the same dataset, keep the same lane,
+  same `table=`, and same stable `key=` values. Rerun after patching so changed
+  cells update in place and the dashboard shows before/after values.
+- If they want a clean redo, comparison, or separate version, use a new stable
+  `--session <name>` or `--session auto` so the dashboard gets a separate run.
+
+If the intent is ambiguous, ask: "Should I update the current run in place, or
+start a separate run so you can compare old and new results?"
+
 ## Dashboard schema
 
 Before wiring a new workflow, propose the dashboard rows and columns to the
@@ -107,12 +163,16 @@ operator instead of asking an open-ended question. Cover:
 - sources and destinations as columns, such as `source`, `supabase`, `hubspot`;
 - status/outcome fields, such as `status`, `condition`, `error`;
 - stable row identity via `key=`.
+- headline summary metrics for the top strip, usually 3-5 numbers the operator
+  actually needs, such as `processed`, `qualified`, `emails_enriched`,
+  `sheet_rows_appended`; do not dump every counter.
 
 Example proposal:
 
 > I will surface one `companies` row per domain with `source`, `condition`,
 > `supabase`, `hubspot`, `status`, plus a `contacts` table with `name`, `title`,
-> `tier`, `email`. Confirm or edit before I wire the ledger.
+> `tier`, `email`. The top strip will show `processed`, `qualified`,
+> `emails_found`, and `CRM writes`. Confirm or edit before I wire the ledger.
 
 ## Safety rules
 

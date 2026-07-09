@@ -175,12 +175,52 @@ python3 skills/observer-kit/example_worker.py --table alpha  # second copy REFUS
 ```bash
 observer-kit init ./my-project
 observer-kit dashboard ./my-project/.runguard --port 8484
+observer-kit watch ./my-project/.runguard --run runguard:my-run.jsonl --follow
+observer-kit watch ./my-project/.runguard --all --follow
+observer-kit run --state-dir ./my-project/.runguard --dashboard -- python3 enrich_companies.py --dry-run --limit 10
+observer-kit run --state-dir ./my-project/.runguard --session auto -- python3 enrich_companies.py --full-run
+observer-kit reply ./my-project/.runguard --run runguard:my-run.jsonl --anchor cell:companies:2 --text "Fixed this and reran the sample."
 observer-kit test
 observer-kit doctor ./my-project
 ```
 
-`init` vendors `runguard.py`, creates `.runguard`, copies the `EXPLAIN.md`
-template, and writes a small `.runguard/.gitignore`.
+`init` vendors `runguard.py` and `watch_chat.py`, creates `.runguard`, copies
+the `EXPLAIN.md` template, and writes a small `.runguard/.gitignore`.
+
+`watch` is a harness bridge, not an agent. It reads dashboard chat for one run
+and emits structured `OBSERVER_CHAT_EVENT ...` lines to stdout so the active
+Codex/Claude/Goose/etc. session can decide what to inspect, patch, rerun, or
+reply. Observer Kit is the observed run substrate and event transport; the
+harness thread/session remains the brain. The harness must run or monitor this
+stdout bridge for notes to wake the active session.
+
+For a long-lived dashboard server, prefer `observer-kit watch .runguard --all
+--follow` in the active harness session. It bridges notes from any run in that
+dashboard state directory, including completed runs the operator clicks later.
+
+`run` is the convenience launcher for agent-started pipelines. It sets
+`RUNGUARD_STATE_DIR`, optionally starts the dashboard, runs the command you pass
+after `--`, detects the `OBSERVER_RUN_STARTED` marker from `runguard.py`, and
+connects the scoped watcher for that run. After the child command exits, the
+dashboard/watch bridge stays alive for sample review until Ctrl-C; use
+`--exit-after-run` when you want smoke-test behavior. It does not approve full
+runs or make workflow decisions.
+
+For failure recovery on the same source data, keep the same lane: omit
+`--session`, or pass the same stable session name again. The retry appends to the
+same ledger so the operator sees the failed attempt, checkpoints, fixes, and
+successful continuation in one dashboard run.
+
+Use `--session auto` only when you intentionally want a fresh historical run in
+the same dashboard state directory, such as a new batch, weekly import, or demo
+run. Without a session, `runguard.py` keeps appending to the same source-scoped
+ledger so reruns show before/after in one continuous lane.
+
+When a dashboard note asks the agent to change the script, choose the lane based
+on operator intent. Fixing or continuing the same dataset should reuse the same
+lane, table names, and row keys so updated cells render in place with
+before/after values. A clean redo or comparison should use a new session so it
+appears as a separate dashboard run.
 
 ## What's inside `skills/observer-kit/`
 
