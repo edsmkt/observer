@@ -64,7 +64,7 @@ run = start_observed_run(
 try:
     for item in items:
         with run.step('step_name', table='companies', key=item.id,
-                      company=item.domain, condition='pending'):
+                      company=item.domain, condition='running'):
             result = do_work(item)
             if not run.dry_run:
                 write_result(item, result)
@@ -79,6 +79,25 @@ except Exception as exc:
 
 Stable `table=` and `key=` values are what let reruns update rows in place and
 show before/after values.
+
+## Live observability contract
+
+The dashboard is only live if the script writes ledger events while work is
+happening. Do not batch all provider work in memory and emit rows only at the
+final write pass.
+
+For every slow loop, provider batch, thread pool, scraper page, cache fill, or
+external write phase:
+
+- emit a visible `run.step(...)` row when an item starts and finishes;
+- call `run.count(...)` and `run.checkpoint(...)` inside the loop, not only at
+  the end;
+- keep output/logs unbuffered for long runs, e.g. `python3 -u` or `flush=True`;
+- if using low-level `ledger(...)`, emit progress events with stable `table=`
+  and `key=` values from the same loop that spends, scrapes, or mutates.
+
+If a dashboard looks stale while logs/cache files change, patch the script to
+emit incremental ledger events before continuing the full run.
 
 ## Dashboard proposal
 

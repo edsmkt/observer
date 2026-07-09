@@ -116,6 +116,61 @@ custom event vocabulary, but keep this shape unless there is a real reason not
 to. If adding Observer Kit to a new risky script takes more than a few minutes,
 the wrapper is too big.
 
+## Live observability contract
+
+The dashboard tails the ledger; it cannot show progress the script has not
+written. A risky workflow is not correctly observed if it spends, scrapes,
+fills a cache, waits on a provider batch, or mutates records for minutes and
+only emits dashboard rows at the final write pass.
+
+Put ledger writes in the same loops that do the risky work:
+
+```python
+for company in companies:
+    with run.step('resolve_linkedin', table='companies', key=company['domain'],
+                  company=company['domain'], linkedin_status='running'):
+        result = resolve_linkedin(company)
+        save_cache(company, result)
+        run.count('linkedin_checked')
+        if result.url:
+            run.count('linkedin_resolved')
+        run.checkpoint('last_domain', company['domain'])
+```
+
+For provider batches, emit one event before and after each batch so the
+operator can tell "slow provider page" from "dead run":
+
+```python
+for batch_no, batch in enumerate(chunks(items, 50), start=1):
+    run.checkpoint('provider_batch', batch_no)
+    with run.step('provider_batch', table='batches', key=f'blitz:{batch_no}',
+                  provider='blitz', size=len(batch), status='running'):
+        response = call_provider(batch)
+        run.count('provider_batches')
+        run.count('provider_results', len(response.results))
+```
+
+For thread pools, write progress as futures finish, not after all futures join:
+
+```python
+with ThreadPoolExecutor(max_workers=workers) as ex:
+    futures = {ex.submit(enrich_one, item): item for item in items}
+    for future in as_completed(futures):
+        item = futures[future]
+        with run.step('enrich_one', table='companies', key=item.id,
+                      company=item.domain):
+            result = future.result()
+            persist(result)
+            run.count('processed')
+            run.checkpoint('last_item', item.id)
+```
+
+If stdout/stderr is redirected during a long run, keep it unbuffered
+(`python3 -u`, `PYTHONUNBUFFERED=1`, or `print(..., flush=True)`) so logs and
+dashboard timing agree. If the dashboard looks stale while cache files or logs
+change, patch the script to emit incremental ledger events before continuing
+the full run.
+
 ## Required sample gate
 
 For anything that spends credits, scrapes in bulk, sends messages, or mutates a
@@ -263,6 +318,9 @@ whatever you load into `entity → ordered candidates` and go. Two rules:
      scripts must not block each other.
    - `ledger('<scope>', 'run_started', ...)` / `'run_finished'` and one event
      per meaningful outcome, following the vocabulary above.
+   - Emit progress from inside every slow item loop, provider batch, thread
+     pool, scraper page, cache-fill loop, and external write loop. Never rely
+     on a final merge/write pass as the first visible dashboard update.
    - If a shared client library makes the writes, acquire the lock INSIDE the
      library's mutating call (gate on HTTP method, exempt read-only POSTs like
      search endpoints) — then every future script inherits the guard for free.
