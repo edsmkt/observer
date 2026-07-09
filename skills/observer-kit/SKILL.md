@@ -9,6 +9,25 @@ Use Observer Kit to make risky batch scripts guarded, observable, and reviewable
 Default to the smallest safe integration: a lock, append-only ledger, dry-run
 sample, dashboard review, and explicit confirmation before the full run.
 
+## Required guardrails (checked by lint)
+
+Run `python3 references/lint_emit.py <script.py>` before the full run — exit 1
+means the script must be fixed first. To pass, do these three things:
+
+1. **Emit each `record` row the moment its item is processed.** Call
+   `ledger(scope, 'record', ...)` (or `run.step(...)`) from inside the same loop
+   that does the work, with stable `table=` and `key=`. For merged/threaded
+   results, emit inside the completion block (e.g. every 100 items in an
+   `as_completed` loop). See "Emit records as work lands" under Live
+   observability contract.
+2. **Give every slow loop its own ledger row.** Provider batch, thread pool,
+   scraper page, cache fill, and external write phase each emit a row as it
+   happens — not after the run finishes.
+3. **Run a `--dry-run` sample first.** See Non-negotiable gate below.
+
+Writing a row per item as it completes keeps the dashboard live and means a
+crash mid-run loses at most the last partial batch instead of everything.
+
 ## Non-negotiable gate
 
 For any workflow that spends credits, scrapes in bulk, sends messages, or writes
@@ -82,9 +101,9 @@ show before/after values.
 
 ## Live observability contract
 
-The dashboard is only live if the script writes ledger events while work is
-happening. Do not batch all provider work in memory and emit rows only at the
-final write pass.
+The dashboard shows live progress when the script writes ledger events while
+work is happening. Write each `record` row from the same loop that does the
+work, as the item completes.
 
 For every slow loop, provider batch, thread pool, scraper page, cache fill, or
 external write phase:
@@ -96,8 +115,52 @@ external write phase:
 - if using low-level `ledger(...)`, emit progress events with stable `table=`
   and `key=` values from the same loop that spends, scrapes, or mutates.
 
-If a dashboard looks stale while logs/cache files change, patch the script to
-emit incremental ledger events before continuing the full run.
+Write a row per item as it completes, and the dashboard stays live and the run
+survives a crash. If a dashboard looks stale while logs/cache files change, add
+incremental ledger emits to the script before continuing the full run.
+
+### Emit records as work lands (the #1 observer-kit requirement)
+
+Write each `record` row the moment its item is done — inside the same loop that
+does the work. The dashboard then shows contacts as they are sourced and a
+crash mid-run loses at most the last partial batch instead of everything.
+
+**Pattern — emit inside the work loop:**
+
+```python
+for item in todo:
+    with run.step('contact', table='contacts', key=item.id):
+        result = do_work(item)
+        # ledger row written the moment this item is done
+        run.count('contacts_found' if result else 'contacts_missed')
+```
+
+**Pattern — emit from a thread/process pool completion block** (when results
+are merged from several provider phases before a row makes sense):
+
+```python
+for f in as_completed(futures):          # thread/process pool
+    vat, people = f.result()
+    results_by_vat[vat].extend(people)
+    if n_done % 100 == 0:                # flush every batch, not only at the end
+        _emit_live_contacts(todo, results_by_vat, fallback_vats)
+```
+
+**Anti-pattern — buffer everything, flush at the end.** This defeats the
+dashboard and loses all results on a mid-run crash. The linter flags it:
+
+```python
+results = {}                       # buffered in memory
+for item in todo:
+    results[item.id] = do_work(item)   # all work happens here
+# ... thousands of items later ...
+for item in todo:                  # flush only at the very end
+    ledger(scope, 'record', table='contacts', key=item.id, **results[item.id])
+```
+
+**Verify before the full run:** `python3 references/lint_emit.py <script.py>`
+exits 0 when every `record` emit is reachable from inside a per-item loop, and
+exits 1 when emits only happen in a final flush block. Fix until it exits 0.
 
 ## Dashboard proposal
 
@@ -108,7 +171,7 @@ open-ended question. Include:
 - stable `key=` values;
 - source/destination columns, such as `source`, `hubspot`, `google_sheet`;
 - outcome columns, such as `condition`, `status`, `error`;
-- 3-5 headline `summary_metrics`; do not dump every counter.
+- 3-5 headline `summary_metrics`; pick the few counters that matter most.
 
 Example:
 
@@ -132,14 +195,14 @@ separate run so you can compare old and new results?"
 
 ## Safety rules
 
-- A lock refusal is the guard working. Do not bypass it.
+- Treat a lock refusal as the guard working: stop the named PID deliberately or wait for it to finish.
 - Default to one lock scope per external system or dataset identity.
 - Parallel scopes are safe only when datasets are provably disjoint. If overlap
   is possible, use the same lock scope and run serially.
 - Use `throttle(provider, rate)` before calls to shared provider accounts.
-- Design resume by re-reading durable state; avoid cleanup-only recovery.
+- Design resume by re-reading durable state so a re-run recomputes what is still missing.
 - Put a hard spend/write ceiling in code.
-- Never re-buy or rewrite a record whose outcome is already logged.
+- Re-read the logged outcome before writing a record again, so each entity is paid for only once.
 - Use `EXPLAIN.md` for non-obvious or high-risk pipelines.
 
 ## Files to use
@@ -152,5 +215,13 @@ separate run so you can compare old and new results?"
   watcher/session semantics, parallelism, or adaptation guidance.
 - `references/build-guide.md`: load only when rebuilding the stack or debugging
   acceptance-test details.
+- `references/lint_emit.py`: **run on every agent-written batch script before the
+  full run.** Fails (exit 1) if `record` ledger events are buffered and flushed
+  only at the end instead of emitted as work lands. CI must block the full run
+  on a non-zero exit.
+
+```bash
+python3 references/lint_emit.py path/to/workflow.py   # exit 0 = OK, 1 = buffered-flush violation
+```
 
 Run `python3 test_runguard.py` after changing the safety core.

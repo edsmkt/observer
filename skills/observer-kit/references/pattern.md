@@ -23,7 +23,8 @@ mutate shared state (CRM, database). Give this folder to a project agent and say
    - `acquire_lock(scope)` — a PID lockfile per scope. A second process on the
      same scope refuses to start (SystemExit) while the first is alive.
      Re-entrant within one process. Stale locks (dead PID) are taken over
-     silently. Crash recovery is "just re-run" — never a manual cleanup.
+     silently. Crash recovery is "just re-run" — resume by re-running the same
+     source with no manual cleanup step.
    - `ledger(scope, event, **fields)` — appends one JSON line to a per-run
      ledger file. This is the local audit trail AND the dashboard's data feed.
    - `start_observed_run(name, ...)` — the boring default wrapper for new
@@ -38,7 +39,7 @@ mutate shared state (CRM, database). Give this folder to a project agent and say
      "searching…" to the found value in real time.
    - **Timeline** — plain-English event feed; raw API calls behind a toggle.
    - **Run info** — this run's identity + run-level progress (rounds, credits,
-     start/finish), kept off the table so a huge run never buries it.
+     start/finish), kept off the table so a huge run leaves them easy to find.
    - **How it works** — renders `EXPLAIN.md`: a plain-English + ASCII statement
      of intent the operator reads to verify the run before it spends.
 
@@ -56,16 +57,16 @@ Bulk writes go wrong when a second process starts while the first is still
 running — nobody realizes — and the cleanup attempt makes it worse. The fix is
 structural, not procedural:
 
-- **A lock refusal is the guard working, not an error to bypass.** If you hit
-  "REFUSING TO START", stop the named PID deliberately or wait. NEVER launch a
-  parallel run to "fix" a stuck one.
-- **Design scripts so there is no cleanup step.** Results are written to the
-  durable store as they land; a re-run recomputes what's still missing from
-  that store. Then a crash costs nothing and resume is always safe.
+- **Treat a lock refusal as the guard working.** When you see
+  "REFUSING TO START", stop the named PID deliberately or wait for it to finish.
+  Start a parallel run only after the first has exited.
+- **Write results to the durable store as they land**, with no cleanup step. A
+  re-run then recomputes only what is still missing, so a crash costs nothing and
+  resume is always safe.
 - **Put a hard spend ceiling in the code**, defaulting to the computed
   worst-case need of the plan — a loop bug then cannot overspend even in theory.
-- **Never submit more work for one entity than its remaining need.** If the
-  provider charges per result, in-flight ≤ need means worst-case spend = cap.
+- **Submit no more work for one entity than its remaining need.** When the
+  provider charges per result, keep in-flight ≤ need so worst-case spend = cap.
 
 ## The boring default contract
 
@@ -228,8 +229,9 @@ Run lanes:
 - Clean redo, comparison, or new batch: use a new stable `--session <name>` or
   `--session auto` so the dashboard gets a separate historical run.
 
-Use `--session auto` only when a separate run is intentional. Do not use it for
-failure recovery on the same source data.
+Use `--session auto` for a separate intentional run. Rely on the same lane
+(re-run with no session) for failure recovery on the same source data, so the
+dashboard updates the existing rows in place.
 
 ## Event vocabulary (what the dashboard understands)
 
@@ -296,14 +298,14 @@ Try it: `example_worker.py --table alpha` and `--table beta` in two terminals
 ## Input/output sources — anything goes, with one rule
 
 The "table" a worker runs over can be a CSV, a JSON file, a Supabase/Postgres
-query, a Google Sheet, an API — the guard pieces never see it. Normalize
+query, a Google Sheet, an API — the guard pieces stay independent of it. Normalize
 whatever you load into `entity → ordered candidates` and go. Two rules:
 
-1. **Results must land in a durable, re-readable store** (DB row updates, a
-   Sheet via API, or an append-only checkpoint file). Resume and never-re-buy
-   work by re-reading that store at plan time and skipping anything that
-   already has a value or an attempted-outcome marker. Never rewrite a whole
-   CSV in place mid-run — a crash mid-rewrite loses state; append or patch.
+1. **Land results in a durable, re-readable store** (DB row updates, a
+   Sheet via API, or an append-only checkpoint file). Resume by re-reading that
+   store at plan time and skip anything that already has a value or an
+   attempted-outcome marker. Append or patch records rather than rewriting a
+   whole CSV in place mid-run, so a crash mid-write preserves existing state.
 2. **Derive the lock scope from the dataset's identity** (table name, sheet ID,
    file path) — e.g. `acquire_lock(f'enrich-{sheet_id}')` — so the same dataset
    refuses to run twice no matter which script or session starts it.
@@ -319,8 +321,9 @@ whatever you load into `entity → ordered candidates` and go. Two rules:
    - `ledger('<scope>', 'run_started', ...)` / `'run_finished'` and one event
      per meaningful outcome, following the vocabulary above.
    - Emit progress from inside every slow item loop, provider batch, thread
-     pool, scraper page, cache-fill loop, and external write loop. Never rely
-     on a final merge/write pass as the first visible dashboard update.
+     pool, scraper page, cache-fill loop, and external write loop. Make the
+     first visible dashboard update arrive from the work loop itself, not a
+     final merge/write pass.
    - If a shared client library makes the writes, acquire the lock INSIDE the
      library's mutating call (gate on HTTP method, exempt read-only POSTs like
      search endpoints) — then every future script inherits the guard for free.
@@ -329,10 +332,10 @@ whatever you load into `entity → ordered candidates` and go. Two rules:
    http://localhost:8484.
 4. If your provider charges per result: implement the spend rules from the
    "Why it exists" section (ceiling = worst-case need; in-flight ≤ remaining
-   need per entity; never re-buy — skip records whose outcome column/field is
-   already set from a previous run).
+   need per entity; skip records whose outcome column/field is already set
+   from a previous run, so each entity is processed only once).
 
-## Scaling path — do NOT migrate the ledgers to a database
+## Scaling path — keep the ledgers as append-only JSONL files
 
 The write path stays append-only JSONL files, deliberately. Reasons: N
 concurrent processes append with zero contention (a DB would reintroduce
@@ -356,8 +359,8 @@ One `pip install duckdb` (or the CLI binary) and the whole ledger history is a
 queryable database VIEW while the files remain the source of truth. Full SQL
 storage only becomes right if runs go multi-machine or you need retention
 policies over tens of thousands of runs. If you are an agent considering
-"helpfully" migrating this to SQLite/Postgres: don't — read the paragraph
-above first.
+migrating this to SQLite/Postgres: read the paragraph above first — keep the
+JSONL files as the source of truth and query them with DuckDB.
 
 ## Files
 

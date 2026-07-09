@@ -167,7 +167,7 @@ def read_events(run_id, offsets):
             read_limit = EVENT_READ_BYTES
         else:
             off = 0
-            read_limit = None
+            read_limit = EVENT_READ_BYTES  # cap: fills in progressively across polls
         if size < off:
             off = 0  # rotated/truncated
         with open(path, 'rb') as f:
@@ -344,7 +344,8 @@ th[data-col]:hover,td[data-col]:hover{outline:1px solid #34506e;outline-offset:-
   </div>
 </div>
 <script>
-let sel=null, offsets={}, all=[], view='records', chatByAnchor={}, chatOpenAnchor=null, colW={}, recTab=null, currentLocks=[];
+let sel=null, offsets={}, all=[], view='records', chatByAnchor={}, chatOpenAnchor=null, colW={}, recTab=null, currentLocks=[], _buildAbort=null;
+let _eventCount=-1, _lastView=null, _lastSel=null, _lastRecTab=null, _recGroupsCache=null, _recGroupsVer=0;
 const ATTENTION_RE=/(fail|error|refus|reject|timeout|exception|invalid|denied|blocked|stuck|\b[45]\d\d\b)/i;
 function setRecTab(t){recTab=t;render();}
 const COLW_DEFAULT={Company:190,Person:150,Tier:80,Phone:170,Email:230,'CRM id':120};
@@ -577,17 +578,16 @@ function recordGroups(events){
   return {groups,gorder};
 }
 function renderRecordTable(groups, gorder, label){
-  if(!gorder.length)return '';
-  const gwas=p=>'';
+  if(!gorder.length)return null;
   if(!gorder.includes(recTab))recTab=gorder[0];
   const g=groups[recTab];
   const rowKeys=view==='attention' ? g.order.filter(k=>isAttentionRecord(g.rows[k])) : g.order;
   const visibleRows=rowKeys.map(k=>g.rows[k]);
   const always=new Set(['company','name','status','source_status','linkedin_status','contact_status','error']);
   let cols=g.cols.filter(c=>{
-    const filled=visibleRows.filter(r=>r[c]!==undefined&&r[c]!==null&&r[c]!==''&&r[c]!==false).length;
+    const filled=visibleRows.filter(r=>r[c]!==undefined&&r[c]!==null&&r[c]!=='').length;
     if(!filled)return false;
-    return always.has(c)||filled>=Math.max(3, Math.ceil(visibleRows.length*.02));
+    return always.has(c)||filled>=Math.max(1, Math.ceil(visibleRows.length*.02));
   });
   if(cols.includes('company')&&cols.includes('name')){
     const same=visibleRows.filter(r=>String(r.company??'')===String(r.name??'')).length;
@@ -610,12 +610,34 @@ function renderRecordTable(groups, gorder, label){
   const subtabs=gorder.length>1
     ? `<div class=subtabs>`+gorder.map(t=>`<span class="subtab ${t===recTab?'sel':''}" onclick="setRecTab('${esc(t)}')">${esc(t)} <small>· ${groups[t].order.length}</small></span>`).join('')+'</div>'
     : '';
-  return `${label?`<div class=card><h4>${esc(label)}</h4></div>`:''}<div class=recordshell style="height:${contentViewportHeight()}px">${subtabs}`+
-    `<div class=tablewrap><table style="width:${gtot}px"><tr>${cols.map(c=>`<th data-col="${esc(recTab+'::'+c)}" style="width:${gbase[c]}px">${esc(c)}<span class=rz></span></th>`).join('')}</tr>`+
-    rowKeys.map(k=>{const r=g.rows[k];
-      return `<tr data-key="${esc(recTab+'::'+k)}" data-co="${esc(k)}" data-name="${esc(k)}">`+
-        cols.map(c=>`<td data-col="${esc(recTab+'::'+c)}">${gcell(c,r[c])}${gwas(r.__prev[c])}</td>`).join('')+`</tr>`;
-    }).join('')+'</table></div></div>';
+  const rrow=(k)=>{const r=g.rows[k];
+    return `<tr data-key="${esc(recTab+'::'+k)}" data-co="${esc(k)}" data-name="${esc(k)}">`+
+      cols.map(c=>`<td data-col="${esc(recTab+'::'+c)}">${gcell(c,r[c])}</td>`).join('')+`</tr>`;
+  };
+  const thead=`<tr>${cols.map(c=>`<th data-col="${esc(recTab+'::'+c)}" style="width:${gbase[c]}px">${esc(c)}<span class=rz></span></th>`).join('')}</tr>`;
+  // small tables (≤500 rows): build in one shot
+  if(rowKeys.length<=500)
+    return `${label?`<div class=card><h4>${esc(label)}</h4></div>`:''}<div class=recordshell style="height:${contentViewportHeight()}px">${subtabs}<div class=tablewrap><table style="width:${gtot}px">${thead}${rowKeys.map(rrow).join('')}</table></div></div>`;
+  // large tables: write shell + thead immediately, stream tbody rows via setTimeout
+  _buildAbort && _buildAbort();
+  const shell=document.createElement('div');
+  shell.innerHTML=`${label?`<div class=card><h4>${esc(label)}</h4></div>`:''}<div class=recordshell style="height:${contentViewportHeight()}px">${subtabs}<div class=tablewrap><table style="width:${gtot}px">${thead}</table></div></div>`;
+  content.replaceChildren(shell);
+  const table=shell.querySelector('.tablewrap table');
+  let aborted=false;
+  _buildAbort=()=>{aborted=true};
+  const BATCH=500;let idx=0;
+  function appendBatch(){
+    if(aborted)return;
+    const end=Math.min(idx+BATCH, rowKeys.length);
+    let rows='';
+    for(; idx<end; idx++)rows+=rrow(rowKeys[idx]);
+    table.insertAdjacentHTML('beforeend', rows);
+    if(idx<rowKeys.length)setTimeout(appendBatch, 0);
+    else decorateChat();
+  }
+  setTimeout(appendBatch, 0);
+  return null; // chunked — caller skips content.innerHTML assignment
 }
 // A column is "categorical" (worth coloring + counting) if it repeats values and
 // has few distinct ones — that targets status/source/sink columns and skips names/ids.
@@ -745,6 +767,9 @@ function attemptBanner(){
 }
 
 function render(){
+  // skip full re-render when no new events and same view — avoids rebuilding 15k-row table every 2s
+  if(all.length===_eventCount&&view===_lastView&&sel===_lastSel&&recTab===_lastRecTab)return;
+  _eventCount=all.length;_lastView=view;_lastSel=sel;_lastRecTab=recTab;
   for(const [v,id] of Object.entries({records:'tabRecords',attention:'tabAttention',feed:'tabFeed',info:'tabInfo',explain:'tabExplain'}))
     document.getElementById(id).classList.toggle('sel',view===v);
   const tech=document.getElementById('tech').checked;
@@ -806,11 +831,10 @@ function render(){
   // when a run has no `record` events.
   const recEvents=all.filter(e=>(e.event||e.action)==='record');
   if(recEvents.length){
-    // group records by their `table` field: a multi-step workflow emits different
-    // shapes at each step (companies → contacts → enriched…), each its own table.
-    const {groups,gorder}=recordGroups(all);
-    let html=renderRecordTable(groups,gorder,'');
-    content.innerHTML=html||'<div class=empty>No records yet.</div>';
+    if(all.length!==_recGroupsVer||!_recGroupsCache)_recGroupsCache=recordGroups(all),_recGroupsVer=all.length;
+    const {groups,gorder}=_recGroupsCache;
+    const html=renderRecordTable(groups,gorder,'');
+    if(html!==null)content.innerHTML=html;
     decorateChat();
     return;
   }
