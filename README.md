@@ -222,6 +222,11 @@ lane, table names, and row keys so updated cells render in place with
 before/after values. A clean redo or comparison should use a new session so it
 appears as a separate dashboard run.
 
+Parallel runs should share a lock scope unless their input records are provably
+disjoint. If two sessions might touch the same website, contact, account, row,
+or external object, run them serially. `throttle()` protects provider rate
+limits; it does not prevent duplicate work on overlapping records.
+
 ## What's inside `skills/observer-kit/`
 
 | File | What it is |

@@ -131,6 +131,51 @@ Default sequence:
 
 Silence is not approval. If the sample exposes problems, fix and re-sample.
 
+## Dashboard chat, watchers, and run lanes
+
+The dashboard writes operator notes to one shared `chat.jsonl`, tagged with the
+run id and anchor. Watchers are I/O bridges, not agents: they emit notes to the
+active harness session, and the harness decides what to inspect, patch, rerun,
+or reply.
+
+For a long-lived dashboard server, keep one all-run watcher attached to the
+harness:
+
+```bash
+observer-kit dashboard .runguard
+observer-kit watch .runguard --all --follow
+```
+
+That watcher emits notes for any run in the state directory, including completed
+runs the operator opens later. For a temporary run-scoped bridge, use:
+
+```bash
+observer-kit watch .runguard --run runguard:my-run.jsonl --follow
+```
+
+Reply into the same dashboard thread with:
+
+```bash
+observer-kit reply .runguard --run runguard:my-run.jsonl --anchor <anchor> --text "Handled."
+```
+
+`observer-kit run` detects the `OBSERVER_RUN_STARTED` marker and starts a
+scoped watcher automatically unless `--watch none` is passed. That is useful for
+quick one-command runs. For serious monitoring, prefer a standalone dashboard
+plus `watch --all`.
+
+Run lanes:
+
+- Same source retry, fix, or dashboard-chat adaptation: keep the same lane
+  (`--session <source-id>` or no session), same `table=`, and same stable
+  `key=` values. The retry appends to the same ledger and changed cells update
+  in place with before/after values.
+- Clean redo, comparison, or new batch: use a new stable `--session <name>` or
+  `--session auto` so the dashboard gets a separate historical run.
+
+Use `--session auto` only when a separate run is intentional. Do not use it for
+failure recovery on the same source data.
+
 ## Event vocabulary (what the dashboard understands)
 
 The dashboard renders any JSON events, but these names get first-class
