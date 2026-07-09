@@ -578,17 +578,21 @@ function recordGroups(events){
 }
 function renderRecordTable(groups, gorder, label){
   if(!gorder.length)return '';
-  const gwas=p=>p!==undefined?` <small style="color:var(--warn)">· was ${esc(fmt(p))}</small>`:'';
+  const gwas=p=>'';
   if(!gorder.includes(recTab))recTab=gorder[0];
   const g=groups[recTab];
   const rowKeys=view==='attention' ? g.order.filter(k=>isAttentionRecord(g.rows[k])) : g.order;
   const visibleRows=rowKeys.map(k=>g.rows[k]);
   const always=new Set(['company','name','status','source_status','linkedin_status','contact_status','error']);
-  const cols=g.cols.filter(c=>{
+  let cols=g.cols.filter(c=>{
     const filled=visibleRows.filter(r=>r[c]!==undefined&&r[c]!==null&&r[c]!==''&&r[c]!==false).length;
     if(!filled)return false;
     return always.has(c)||filled>=Math.max(3, Math.ceil(visibleRows.length*.02));
   });
+  if(cols.includes('company')&&cols.includes('name')){
+    const same=visibleRows.filter(r=>String(r.company??'')===String(r.name??'')).length;
+    if(same>=visibleRows.length*.95)cols=cols.filter(c=>c!=='name');
+  }
   if(!cols.length)return '<div class=empty>No populated columns for these rows yet.</div>';
   const cats=catColumns(g.order.map(k=>g.rows[k]), cols);
   const gcell=(c,v)=>{
