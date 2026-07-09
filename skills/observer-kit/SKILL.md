@@ -2,8 +2,7 @@
 name: observer-kit
 description: Guardrails and a live localhost dashboard for scripts that spend API credits, scrape in bulk, send messages, or mutate shared state such as CRM, database, and spreadsheet records. Use when the user asks to "use observer-kit", "wire in observer-kit", "run observer kit", "make this script safe", "add locks/ledger/dashboard", "add dry-run sample gating", build a workflow or pipeline, push data, pull data, sync records, backfill, import/export data, enrich leads/contacts/accounts, contact source, scrape, run a CRM push, or before writing/running any batch job where duplicate runs, hidden failures, or full-run execution without review could cost money or corrupt data.
 ---
-
-# observer-kit
+**observer-kit**
 
 Use Observer Kit to make risky batch scripts guarded, observable, and reviewable.
 Default to the smallest safe integration: a lock, append-only ledger, dry-run
@@ -15,14 +14,11 @@ Run `python3 references/lint_emit.py <script.py>` before the full run — exit 1
 means the script must be fixed first. To pass, do these three things:
 
 1. **Emit each `record` row the moment its item is processed.** Call
-   `ledger(scope, 'record', ...)` (or `run.step(...)`) from inside the same loop
-   that does the work, with stable `table=` and `key=`. For merged/threaded
-   results, emit inside the completion block (e.g. every 100 items in an
-   `as_completed` loop). See "Emit records as work lands" under Live
-   observability contract.
+ledger(scope, 'record', ...)`(or`run.step(...)`) from inside the same loop hat does the work, with stable` table=`and`key=`. For merged/threaded esults, emit inside the completion block (e.g. every 100 items in an as_completed` loop). See "Emit records as work lands" under Live
+bservability contract.
 2. **Give every slow loop its own ledger row.** Provider batch, thread pool,
-   scraper page, cache fill, and external write phase each emit a row as it
-   happens — not after the run finishes.
+craper page, cache fill, and external write phase each emit a row as it
+appens — not after the run finishes.
 3. **Run a `--dry-run` sample first.** See Non-negotiable gate below.
 
 Writing a row per item as it completes keeps the dashboard live and means a
@@ -36,7 +32,7 @@ to a shared system:
 1. Add `--dry-run` plus `--limit` or `--sample-size`.
 2. Run a representative sample first, usually 5-25 records.
 3. Review the dashboard and summarize writes, skips, failures, schema issues, and
-   estimated spend.
+stimated spend.
 4. Wait for explicit confirmation before the full dataset.
 5. Make the full run intentional, e.g. require `--full-run`.
 
@@ -110,10 +106,10 @@ external write phase:
 
 - emit a visible `run.step(...)` row when an item starts and finishes;
 - call `run.count(...)` and `run.checkpoint(...)` inside the loop, not only at
-  the end;
+the end;
 - keep output/logs unbuffered for long runs, e.g. `python3 -u` or `flush=True`;
 - if using low-level `ledger(...)`, emit progress events with stable `table=`
-  and `key=` values from the same loop that spends, scrapes, or mutates.
+and `key=` values from the same loop that spends, scrapes, or mutates.
 
 Write a row per item as it completes, and the dashboard stays live and the run
 survives a crash. If a dashboard looks stale while logs/cache files change, add
@@ -185,10 +181,10 @@ Example:
 Choose the run lane deliberately:
 
 - Same source retry, fix, or dashboard-chat adaptation: keep the same lane
-  (`--session <source-id>` or no session), same `table=`, and same `key=`.
-  Rerun after patching so changed cells update in place.
+(`--session <source-id>` or no session), same `table=`, and same `key=`.
+Rerun after patching so changed cells update in place.
 - Clean redo, comparison, or new batch: use a new stable `--session <name>` or
-  `--session auto` so the dashboard gets a separate run.
+`--session auto` so the dashboard gets a separate run.
 
 If ambiguous, ask: "Should I update the current run in place, or start a
 separate run so you can compare old and new results?"
@@ -198,7 +194,7 @@ separate run so you can compare old and new results?"
 - Treat a lock refusal as the guard working: stop the named PID deliberately or wait for it to finish.
 - Default to one lock scope per external system or dataset identity.
 - Parallel scopes are safe only when datasets are provably disjoint. If overlap
-  is possible, use the same lock scope and run serially.
+is possible, use the same lock scope and run serially.
 - Use `throttle(provider, rate)` before calls to shared provider accounts.
 - Design resume by re-reading durable state so a re-run recomputes what is still missing.
 - Put a hard spend/write ceiling in code.
@@ -210,18 +206,80 @@ separate run so you can compare old and new results?"
 - `runguard.py`: library to vendor next to the target script.
 - `run_dashboard.py`: standalone viewer; run one instance pointed at a ledger dir.
 - `watch_chat.py`: run-scoped watcher for dashboard notes.
+- `session-start.sh`: hook script for agent session auto-wiring (see Agent wiring section).
 - `observer_hook.py`: optional Claude Code hook for run-start reminders.
 - `references/pattern.md`: load only for detailed event vocabulary, dashboard behavior,
-  watcher/session semantics, parallelism, or adaptation guidance.
+watcher/session semantics, parallelism, or adaptation guidance.
 - `references/build-guide.md`: load only when rebuilding the stack or debugging
-  acceptance-test details.
+acceptance-test details.
 - `references/lint_emit.py`: **run on every agent-written batch script before the
-  full run.** Fails (exit 1) if `record` ledger events are buffered and flushed
-  only at the end instead of emitted as work lands. CI must block the full run
-  on a non-zero exit.
+full run.** Fails (exit 1) if `record` ledger events are buffered and flushed
+only at the end instead of emitted as work lands. CI must block the full run
+on a non-zero exit.
 
 ```bash
 python3 references/lint_emit.py path/to/workflow.py   # exit 0 = OK, 1 = buffered-flush violation
 ```
 
 Run `python3 test_runguard.py` after changing the safety core.
+
+## Agent wiring: wake on dashboard feedback
+
+The dashboard operator can leave notes for the agent. Without wiring, the agent
+sits idle waiting. Two pieces make it automatic:
+
+### 1. SessionStart hook (one-time setup)
+
+The hook tells the agent on every session boot that a dashboard watcher is
+active, so it knows to poll for notes without being told.
+
+Place `session-start.sh` at `.claude/hooks/session-start-observer.sh` and wire
+it in `.claude/settings.local.json` or `.commandcode/settings.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./.claude/hooks/session-start-observer.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+On boot the agent sees: "Active Observer Kit dashboard watchers: run
+runguard:reactivation-de-… | To check for feedback: monitor_events({ taskId:
+'<id>' })"
+
+### 2. monitor_command instead of shell_command background
+
+When starting a run scoped watcher, use `monitor_command` with
+`notify: "scheduled"` so the runtime wakes the agent when a dashboard note
+arrives — rather than `shell_command --background` which stays invisible until
+checked manually.
+
+```python
+# In agent code — start the watcher:
+monitor_command({
+  command: "python3 watch_chat.py <run_id> --follow",
+  notify: "scheduled",
+  checkAfterMs: 45000
+})
+
+# Each turn after a monitor ping:
+monitor_events({ taskId })      # read new notes
+# Extract user feedback from notes
+# Post a reply:
+observer-kit reply <run_id> --anchor <anchor> --text "<reply>"
+# Restart the monitor to keep listening:
+monitor_command({ command: "python3 watch_chat.py <run_id> --follow", notify: "scheduled" })
+```
+
+Without both pieces, the operator has to manually say "check the dashboard" on
+every turn — with them, feedback arrives automatically.
