@@ -40,6 +40,43 @@ they're in place first.
 - **`run_dashboard.py` is a standalone viewer** → **do NOT vendor it.** Run one
   instance, pointed at whatever project's ledger dir. One observer serves every project.
 
+**Default to the boring wrapper for new scripts.** It gives you the minimum run
+contract in one place: run id, lock, ledger, dry-run state, visible step rows,
+counters, checkpoints, and lifecycle closure.
+
+```python
+from runguard import start_observed_run
+
+run = start_observed_run(
+    'enrich-leads',
+    lock_key='hubspot-enrich-july-batch',
+    dry_run=args.dry_run,
+    description='Enrich July HubSpot leads',
+    todo=len(leads),
+)
+
+try:
+    for lead in leads:
+        with run.step('enrich_lead', table='companies', key=lead.id,
+                      company=lead.domain):
+            enriched = enrich_lead(lead)
+
+            if not run.dry_run:
+                update_crm_lead(lead.id, enriched)
+
+            run.count('leads_enriched')
+            run.checkpoint('last_lead', lead.id)
+
+    run.success(processed=len(leads))
+except Exception as exc:
+    run.fail(exc)
+    raise
+```
+
+Use the lower-level primitives below when a script needs custom event vocabulary.
+Do not make this ceremony: if adding Observer Kit to a risky script takes more
+than a few minutes, keep the wrapper and simplify the integration.
+
 **First, agree the schema with the operator — propose, don't interrogate.** The
 dashboard shows *exactly* the fields you log, so decide them together before wiring.
 Read what the script does, **propose a sensible default**, and let them accept, edit,

@@ -28,6 +28,16 @@ throttle() every shared API. If the provider charges per result with a
 per-record cap, remember: the in-flight ≤ need invariant only holds within one
 process — overlapping datasets in two processes can double-spend.
 
+For new scripts, prefer the boring wrapper:
+
+  run = start_observed_run('enrich-leads', dry_run=args.dry_run)
+  with run.step('enrich_lead', table='companies', key=lead.id):
+      ...spend or write...
+      run.count('leads_enriched')
+  run.success()
+
+It still uses the same lock, ledger, dashboard feed, and state dir below.
+
 State dir: $RUNGUARD_STATE_DIR, else ./.runguard next to this file. All
 processes that should coordinate must use the SAME state dir.
 Override for deliberate parallel use of one scope (rare): RUNGUARD_DISABLE=1.
@@ -46,6 +56,7 @@ _STATE_DIR = os.environ.get('RUNGUARD_STATE_DIR') or os.path.join(
 
 _held: dict[str, str] = {}   # name -> lockfile path (this process)
 _ledgers: dict[str, str] = {}
+_step_sequences: dict[str, int] = {}
 
 
 def _lockfile(name: str) -> str:
@@ -132,6 +143,115 @@ def current_run_id(scope: str) -> str | None:
     With RUNGUARD_SESSION pinned this stays stable across re-runs, so notes persist."""
     p = _ledgers.get(scope)
     return f'runguard:{os.path.basename(p)}' if p else None
+
+
+class ObservedStep:
+    """Context manager returned by ObservedRun.step()."""
+
+    def __init__(self, run: 'ObservedRun', name: str, fields: dict):
+        self.run = run
+        self.name = name
+        self.fields = dict(fields)
+        self.table = self.fields.pop('table', 'steps')
+        key = self.fields.pop('key', None)
+        if key is None:
+            _step_sequences[run.scope] = _step_sequences.get(run.scope, 0) + 1
+            key = f'{name}:{_step_sequences[run.scope]}'
+        self.key = str(key)
+
+    def __enter__(self):
+        ledger(self.run.scope, 'record', table=self.table, key=self.key,
+               step=self.name, status='running', dry_run=self.run.dry_run,
+               **self.fields)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is None:
+            ledger(self.run.scope, 'record', table=self.table, key=self.key,
+                   step=self.name, status='done', dry_run=self.run.dry_run,
+                   **self.fields)
+            return False
+        ledger(self.run.scope, 'record', table=self.table, key=self.key,
+               step=self.name, status='failed', error=str(exc),
+               dry_run=self.run.dry_run, **self.fields)
+        return False
+
+
+class ObservedRun:
+    """Small run contract for scripts that spend credits or mutate shared state.
+
+    The wrapper deliberately stays thin: it acquires the existing lock, writes
+    the existing JSONL ledger, exposes dry-run state, and gives scripts a common
+    success/fail/counter/checkpoint shape. The low-level primitives remain
+    available for advanced flows.
+    """
+
+    def __init__(self, name: str, lock_key: str | None = None,
+                 dry_run: bool = False, description: str | None = None,
+                 **fields):
+        self.name = name
+        self.scope = lock_key or name
+        self.lock_key = self.scope
+        self.dry_run = bool(dry_run)
+        self.description = description
+        self.counters: dict[str, int | float] = {}
+        self.checkpoints: dict[str, object] = {}
+        self.closed = False
+        acquire_lock(self.lock_key)
+        started = dict(fields)
+        started.update({'name': self.name, 'dry_run': self.dry_run})
+        if description:
+            started['description'] = description
+        ledger(self.scope, 'run_started', **started)
+        self.run_id = current_run_id(self.scope)
+
+    def step(self, name: str, **fields) -> ObservedStep:
+        """Log one visible unit of work as a generic dashboard record."""
+        return ObservedStep(self, name, fields)
+
+    def count(self, name: str, amount: int | float = 1) -> int | float:
+        """Increment an in-memory counter and emit a lightweight metric event."""
+        self.counters[name] = self.counters.get(name, 0) + amount
+        ledger(self.scope, 'metric', metric=name, value=self.counters[name],
+               increment=amount)
+        return self.counters[name]
+
+    def checkpoint(self, name: str, value) -> None:
+        """Record the last durable point the script can resume from."""
+        self.checkpoints[name] = value
+        ledger(self.scope, 'checkpoint', checkpoint=name, value=value)
+
+    def success(self, **fields) -> None:
+        if self.closed:
+            return
+        payload = dict(fields)
+        payload.update(self.counters)
+        if self.checkpoints:
+            payload['checkpoints'] = dict(self.checkpoints)
+        ledger(self.scope, 'run_finished', status='success',
+               dry_run=self.dry_run, **payload)
+        release_lock(self.lock_key)
+        self.closed = True
+
+    def fail(self, error: BaseException | str, **fields) -> None:
+        if self.closed:
+            return
+        payload = dict(fields)
+        payload.update(self.counters)
+        if self.checkpoints:
+            payload['checkpoints'] = dict(self.checkpoints)
+        ledger(self.scope, 'run_failed', status='failed', error=str(error),
+               dry_run=self.dry_run, **payload)
+        release_lock(self.lock_key)
+        self.closed = True
+
+
+def start_observed_run(name: str, lock_key: str | None = None,
+                       dry_run: bool = False, description: str | None = None,
+                       **fields) -> ObservedRun:
+    """Start the boring default contract: lock, run id, ledger, dry-run state."""
+    return ObservedRun(name=name, lock_key=lock_key, dry_run=dry_run,
+                       description=description, **fields)
 
 
 

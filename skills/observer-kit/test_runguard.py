@@ -90,7 +90,32 @@ subprocess.run([sys.executable,'-c','import runguard; runguard.ledger("mysrc","r
 laned = glob.glob(f'{STATE}/2099-01-01-lane-mysrc.jsonl')
 ok("RUNGUARD_SESSION creates a separate lane file", len(laned) == 1, f"{[os.path.basename(f) for f in laned]}")
 
-# ---- 8. Cross-process throttle: N calls at R/s across P procs takes ~ (N-1)/R ----
+# ---- 8. Boring wrapper: lock + dry-run + steps + counters + checkpoints ----
+rc8, out8, err8 = child("""
+import json, os, runguard
+run = runguard.start_observed_run('wrapper-demo', dry_run=True, description='demo')
+assert run.run_id == 'runguard:wrapper-demo.jsonl'
+with run.step('enrich_lead', table='companies', key='lead-1', company='acme'):
+    run.count('leads_enriched')
+    run.checkpoint('last_lead', 'lead-1')
+run.success(processed=1)
+assert not os.path.exists(os.path.join(os.environ['RUNGUARD_STATE_DIR'], 'wrapper-demo.lock'))
+print(runguard.ledger_path('wrapper-demo'))
+""")
+ok("start_observed_run closes and releases its lock", rc8 == 0 and 'wrapper-demo.jsonl' in out8,
+   f"rc={rc8} err={err8.strip()[:120]}")
+wrapper_files = glob.glob(f'{STATE}/wrapper-demo.jsonl')
+if wrapper_files:
+    wrapper_lines = [json.loads(l) for l in open(wrapper_files[0]) if l.strip()]
+    ok("wrapper logs dry-run run_started", wrapper_lines[0]['event'] == 'run_started' and wrapper_lines[0]['dry_run'] is True)
+    ok("wrapper step records running then done",
+       [l.get('status') for l in wrapper_lines if l.get('event') == 'record'] == ['running', 'done'])
+    ok("wrapper success carries counters + checkpoints",
+       wrapper_lines[-1]['event'] == 'run_finished'
+       and wrapper_lines[-1]['leads_enriched'] == 1
+       and wrapper_lines[-1]['checkpoints']['last_lead'] == 'lead-1')
+
+# ---- 9. Cross-process throttle: N calls at R/s across P procs takes ~ (N-1)/R ----
 RATE, CALLS, PROCS = 4, 4, 3   # 12 calls total at 4/s -> expect ~2.75s if cross-process
 worker = "import runguard,time\n[runguard.throttle('api',%d) for _ in range(%d)]\n" % (RATE, CALLS)
 t0 = time.time()

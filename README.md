@@ -12,6 +12,9 @@ no dependencies:
   manual cleanup.
 - **An audit ledger + cross-process rate limiting** — every submission, result,
   and credit recorded; parallel runs share one rate budget per provider.
+- **A boring default wrapper** — `start_observed_run(...)` gives new scripts a
+  run id, lock, dry-run flag, visible step rows, counters, checkpoints, and
+  `success()` / `fail()` lifecycle closure without inventing a run harness.
 - **A read-only web dashboard** (`http://localhost:8484`) — a live per-record
   table, a plain-English timeline, a run-info tab, and a **"How it works"** tab
   that renders a plain-English + ASCII `EXPLAIN.md` so a non-technical operator
@@ -78,6 +81,35 @@ The bundled contact-enrichment view (phones/emails/CRM pills) is just the *examp
 renderer that kicks in for `phone_found`/`email_found` events — remove it or ignore
 it; `record` events are the general path.
 
+## The boring wrapper
+
+For new scripts, use the small helper instead of hand-assembling the lock,
+ledger, dry-run, counters, and lifecycle every time:
+
+```python
+from runguard import start_observed_run
+
+run = start_observed_run('enrich-leads', dry_run=args.dry_run, todo=len(leads))
+
+try:
+    for lead in leads:
+        with run.step('enrich_lead', table='companies', key=lead.id,
+                      company=lead.domain):
+            enriched = enrich_lead(lead)
+            if not run.dry_run:
+                update_crm_lead(lead.id, enriched)
+            run.count('leads_enriched')
+            run.checkpoint('last_lead', lead.id)
+
+    run.success(processed=len(leads))
+except Exception as exc:
+    run.fail(exc)
+    raise
+```
+
+Drop to `acquire_lock()` + `ledger()` only when a pipeline needs custom event
+vocabulary. The default path is meant to stay small enough to add in minutes.
+
 ## Install
 
 Into your user scope (available in every project you open):
@@ -101,7 +133,7 @@ state-mutating batch script.
 ```bash
 git clone https://github.com/edsmkt/observer-kit
 cd observer-kit/skills/observer-kit
-python3 test_runguard.py          # verify the safety core — 11 checks, all pass
+python3 test_runguard.py          # verify the safety core — 15 checks, all pass
 python3 run_dashboard.py          # open http://localhost:8484, pick the sample run
 python3 example_worker.py --table alpha   # watch a run fill the table live
 python3 example_worker.py --table alpha   # a second copy REFUSES — the guard working

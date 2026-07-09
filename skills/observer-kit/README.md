@@ -13,6 +13,9 @@ mutate shared state (CRM, database). Give this folder to a project agent and say
      silently. Crash recovery is "just re-run" — never a manual cleanup.
    - `ledger(scope, event, **fields)` — appends one JSON line to a per-run
      ledger file. This is the local audit trail AND the dashboard's data feed.
+   - `start_observed_run(name, ...)` — the boring default wrapper for new
+     scripts: lock, run id, dry-run flag, generic step records, counters,
+     checkpoints, and `success()` / `fail()` lifecycle closure.
 
 2. **`run_dashboard.py`** — a localhost website (default :8484), a SAMPLE that
    tails the ledger files live. Read-only, zero-intrusion. Four tabs:
@@ -48,6 +51,55 @@ structural, not procedural:
   worst-case need of the plan — a loop bug then cannot overspend even in theory.
 - **Never submit more work for one entity than its remaining need.** If the
   provider charges per result, in-flight ≤ need means worst-case spend = cap.
+
+## The boring default contract
+
+For new scripts, start here. This is the "small wrapper, not an operational
+religion" path:
+
+```python
+from runguard import start_observed_run
+
+run = start_observed_run(
+    'enrich-leads',
+    lock_key='hubspot-enrich-july-batch',
+    dry_run=args.dry_run,
+    description='Enrich July HubSpot leads and fill missing firmographics',
+    todo=len(leads),
+)
+
+try:
+    for lead in leads:
+        with run.step('enrich_lead', table='companies', key=lead.id,
+                      company=lead.domain):
+            enriched = enrich_lead(lead)
+
+            if not run.dry_run:
+                update_crm_lead(lead.id, enriched)
+
+            run.count('leads_enriched')
+            run.checkpoint('last_lead', lead.id)
+
+    run.success(processed=len(leads))
+except Exception as exc:
+    run.fail(exc)
+    raise
+```
+
+That one helper enforces the minimum run shape:
+
+- a lock is acquired before the first spend/write;
+- the run has a dashboard id (`run.run_id`) and a JSONL ledger;
+- `dry_run` is logged and available as `run.dry_run`;
+- every `run.step(...)` writes a visible `record` row (`running` → `done` or
+  `failed`);
+- counters and checkpoints are carried into the final event;
+- `success()` / `fail()` closes the lifecycle and releases the lock.
+
+Use the lower-level `acquire_lock()` + `ledger()` primitives when a script needs
+custom event vocabulary, but keep this shape unless there is a real reason not
+to. If adding Observer Kit to a new risky script takes more than a few minutes,
+the wrapper is too big.
 
 ## Event vocabulary (what the dashboard understands)
 
