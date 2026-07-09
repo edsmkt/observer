@@ -8,8 +8,6 @@ This defeats live dashboard visibility and loses everything if the process
 crashes mid-run. Run it on any script before the full run:
 
     python3 references/lint_emit.py path/to/script.py
-    python3 references/lint_emit.py path/to/script.py --fix-dry-run
-
 Exit code 0 = OK, 1 = violation found (CI should fail the full run).
 
 Heuristic (intentionally simple, stdlib-only):
@@ -29,8 +27,6 @@ import ast
 import sys
 
 RECORD_EVENTS = {'record'}
-# calls that emit a ledger record
-EMIT_FUNCS = {'ledger', 'run.step', 'run.record', 'run.count'}
 
 
 def _is_ledger_record_call(node):
@@ -217,45 +213,6 @@ def _detect_buffered_flush(tree, work_names):
     return None
 
 
-def _node_in_loop_body(loop, node):
-    for child in ast.iter_child_nodes(loop):
-        if child is loop.iter:
-            continue
-        for n in ast.walk(child):
-            if n is node:
-                return True
-    return False
-
-
-def _func_called_from_loop(tree, fname, work_names):
-    for loop in [n for n in ast.walk(tree) if isinstance(n, (ast.For, ast.While))]:
-        if not _loop_ranges_over_work(loop, work_names):
-            continue
-        for call in [n for n in ast.walk(loop) if isinstance(n, ast.Call)]:
-            called = None
-            if isinstance(call.func, ast.Name):
-                called = call.func.id
-            elif isinstance(call.func, ast.Attribute):
-                called = call.func.attr
-            if called == fname:
-                return True
-    return False
-
-
-def _detect_buffered_flush(tree, work_names):
-    """Detect: a results container mutated inside a work loop, but record emits
-    only happen in a separate loop or outside any loop."""
-    for loop in [n for n in ast.walk(tree) if isinstance(n, (ast.For, ast.While))]:
-        if not _loop_ranges_over_work(loop, work_names):
-            continue
-        for n in ast.walk(loop):
-            if isinstance(n, ast.Attribute) and n.attr in ('append', 'extend', 'update', 'add'):
-                base = ast.dump(n.value)
-                if 'result' in base:
-                    return base
-    return None
-
-
 def main():
     ap = argparse.ArgumentParser(description='Lint for buffered-then-flush ledger violation')
     ap.add_argument('script')
@@ -282,7 +239,7 @@ def main():
         if isinstance(lineno, int):
             print(f'  - record emit in {fname}() at line {lineno} is outside any work loop')
     print()
-    print('  See SKILL.md > "FORBIDDEN: buffered-then-flush" for the correct pattern.')
+    print('  See SKILL.md > "Emit records as work lands" for the correct pattern.')
     sys.exit(1)
 
 

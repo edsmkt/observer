@@ -43,7 +43,7 @@ else
   CTX+="To check for operator feedback:${NL}"
   CTX+="  monitor_events({ taskId: \"<watcher_task>\" })  # read new notes${NL}"
   CTX+="To send a reply:${NL}"
-  CTX+="  observer-kit reply <run_id> --anchor <anchor> --text \"<reply>\"${NL}"
+  CTX+="  observer-kit reply <state_dir> --run <run_id> --anchor <anchor> --text \"<reply>\"${NL}"
   CTX+="To start a new watcher for a run:${NL}"
   CTX+="  monitor_command({ command: \"python3 watch_chat.py <run_id>\", notify: \"scheduled\" })${NL}"
 fi
