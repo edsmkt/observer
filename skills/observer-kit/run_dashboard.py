@@ -61,15 +61,6 @@ def _timestamp():
     return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
 
 
-def _first_event(path):
-    try:
-        with open(path, 'rb') as f:
-            line = f.readline(8192).decode('utf-8', 'replace').strip()
-        return json.loads(line) if line else {}
-    except Exception:
-        return {}
-
-
 def _summary_event(path):
     """Return the newest run_started using a complete, incremental ledger scan.
 
@@ -1418,7 +1409,7 @@ function renderFlow(viewScroll){
   if(!flowNodeSelected||!nodes.some(node=>node.id===flowNodeSelected)){
     flowNodeSelected=nodes.find(node=>flowStateClass(states[node.id]?.status)==='running')?.id||nodes[0]?.id||null;
   }
-  const selected=nodes.find(node=>node.id===flowNodeSelected),selectedState=selected?states[selected.id]:null;
+  const selected=nodes.find(node=>node.id===flowNodeSelected);
   const levels=flowLevels(nodes,edges),allKeys=new Set();
   for(const byKey of Object.values(units))for(const key of Object.keys(byKey))allKeys.add(key);
   const businessKeys=new Set(recordEvents().filter(e=>eventName(e)==='record'&&(!graph.table||!e.table||e.table===graph.table)).map(e=>String(e.key)));

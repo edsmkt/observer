@@ -42,9 +42,8 @@ Choose the active branch and load its reference:
 - **Respond to a running workflow**: read the run-lane, controls, watcher, and
   recovery sections of `references/pattern.md`, then inspect the current JSONL,
   durable destination, process state, and script.
-- **Change Observer Kit itself**: read
-  [`references/build-guide.md`](references/build-guide.md), then run the full
-  acceptance suite after the change.
+- **Change Observer Kit itself**: read `references/pattern.md` in full, inspect
+  the affected runtime and matching tests, then run the full acceptance suite.
 
 Read the target script/config when present; for new work, inspect the source and destination contracts first.
 
@@ -238,8 +237,6 @@ dashboard view.
 - [`references/lint_emit.py`](references/lint_emit.py): static check for final
   flushes and progress paired with memory-buffered results; run before every
   full dataset.
-- [`references/build-guide.md`](references/build-guide.md): Observer Kit core,
-  dashboard, packaging, and acceptance-test contract.
 - `runguard.py`: vendored runtime used by the workflow script.
 - `run_dashboard.py`: localhost dashboard server for one state directory.
 - `watch_chat.py`: dashboard-message transport for the active agent harness.

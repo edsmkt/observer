@@ -166,40 +166,6 @@ def _print_watcher_status(state_dir: Path) -> int:
     return 0
 
 
-def _load_chat(path: Path) -> list[dict]:
-    if not path.exists():
-        return []
-    messages = []
-    with path.open(encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                messages.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    return messages
-
-
-def _chat_signature(message: dict) -> str:
-    return json.dumps(
-        [
-            message.get("ts"),
-            message.get("run"),
-            message.get("anchor"),
-            message.get("author"),
-            message.get("text"),
-        ],
-        ensure_ascii=False,
-        sort_keys=True,
-    )
-
-
-def _wakes_watcher(message: dict) -> bool:
-    return message.get("author") == "user" or message.get("kind") == "control"
-
-
 def _stream_watcher_line(line: str) -> None:
     line = line.strip()
     if not line:

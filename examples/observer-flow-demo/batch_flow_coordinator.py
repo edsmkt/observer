@@ -6,7 +6,6 @@ import argparse
 import hashlib
 import importlib
 import json
-import math
 import os
 import sys
 import time

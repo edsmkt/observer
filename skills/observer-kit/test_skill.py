@@ -15,7 +15,6 @@ passed = failed = 0
 HERE = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path(__file__).resolve().parent
 SKILL = HERE / 'SKILL.md'
 PATTERN = HERE / 'references' / 'pattern.md'
-BUILD_GUIDE = HERE / 'references' / 'build-guide.md'
 LINTER = HERE / 'references' / 'lint_emit.py'
 EXPLAIN = HERE / 'EXPLAIN.md'
 
@@ -68,7 +67,7 @@ ok('description covers workflow, operations, and core-maintenance branches',
        'writing, adapting, or running', 'run controls', 'maintaining Observer Kit')),
    description)
 
-required_paths = [PATTERN, BUILD_GUIDE, LINTER, EXPLAIN]
+required_paths = [PATTERN, LINTER, EXPLAIN]
 ok('every bundled context pointer resolves', all(path.is_file() for path in required_paths),
    ', '.join(str(path) for path in required_paths))
 ok('README and production pattern have explicit purpose pointers',
