@@ -97,6 +97,18 @@ ok('production reference co-locates the critical runtime contracts',
        '## External Delivery', '## Controls, Chat, And Watchers',
        '## Production Verification')))
 
+prove_match = re.search(r'^## 5\. Prove The Sample\n(.*?)(?=^## 6\.)',
+                        skill, re.MULTILINE | re.DOTALL)
+prove_section = prove_match.group(1) if prove_match else ''
+prove_words = ' '.join(prove_section.split())
+pattern_words = ' '.join(pattern.split())
+ok('sample gate requires crash-resume proof beyond a green linter',
+   'forced mid-sample failure resumes in the same lane from saved work' in prove_words and
+   'linter exits zero' in prove_words and
+   'direct evidence' in prove_words and
+   'Treat its zero exit as one piece of evidence' in pattern_words and
+   'confirm the real sink during the sample' in pattern_words)
+
 short_match = re.search(r'short_description:\s*"([^"]+)"', metadata)
 prompt_match = re.search(r'default_prompt:\s*"([^"]+)"', metadata)
 short_description = short_match.group(1) if short_match else ''
