@@ -196,5 +196,93 @@ print('hello')
 """)
 ok("no-record script passes (exit 0)", rc == 0, f"rc={rc}")
 
+# 12. A completed paid unit may persist after its nested pagination loops.
+rc, out, err = run_lint("""
+from runguard import ledger
+def run(companies, durable):
+    results_by_vat = {}
+    for chunk in companies:
+        chunk_hits = {}
+        cursor = 'first'
+        while cursor:
+            response = fetch_paid_provider(chunk, cursor)
+            for person in (response.get('results') or []):
+                vat = person['vat_id']
+                results_by_vat.setdefault(vat, []).append(person)
+                chunk_hits.setdefault(vat, []).append(person)
+            cursor = response.get('cursor')
+        durable.persist('provider', [c['vat_id'] for c in chunk], chunk_hits)
+        ledger('scope', 'record', table='provider_units', key=str(chunk[0]['vat_id']))
+""")
+ok("nested pagination accepts the enclosing unit's later durable write",
+   rc == 0, f"rc={rc}; {out[:220]}")
+
+# 13. A sink before nested work does not protect the result produced afterward.
+rc, out, err = run_lint("""
+def run(companies, durable):
+    results_by_vat = {}
+    for chunk in companies:
+        durable.persist('provider', [], {})
+        for page in fetch_pages(chunk):
+            for person in (page.get('results') or []):
+                results_by_vat.setdefault(person['vat_id'], []).append(person)
+""")
+ok("an enclosing sink before nested work remains a violation",
+   rc == 1 and 'DURABILITY MISSING' in out, f"rc={rc}; {out[:220]}")
+
+# 14. Replaying an append-only durable store is a read, not new paid work.
+rc, out, err = run_lint("""
+import json
+class Durable:
+    def __init__(self, path):
+        self.path = path
+    def load(self, results_by_vat):
+        for line in open(self.path, encoding='utf-8'):
+            record = json.loads(line)
+            for vat, people in (record.get('hits') or {}).items():
+                if vat in results_by_vat:
+                    results_by_vat[vat].extend(people)
+""")
+ok("read-only durable replay does not require another durable write",
+   rc == 0, f"rc={rc}; {out[:220]}")
+
+# 15. Reading a file does not exempt fresh provider work nested inside it.
+rc, out, err = run_lint("""
+import json
+def run(results_by_vat):
+    for line in open('checkpoint.jsonl', encoding='utf-8'):
+        record = json.loads(line)
+        for company in (record.get('companies') or []):
+            person = fetch_paid_provider(company)
+            results_by_vat.setdefault(company['id'], []).append(person)
+""")
+ok("provider work inside a read loop still needs a durable boundary",
+   rc == 1 and 'DURABILITY MISSING' in out, f"rc={rc}; {out[:220]}")
+
+# 16. A final flush inside a surrounding context is still outside the unit loop.
+rc, out, err = run_lint("""
+def run(items):
+    results = {}
+    with open('output.jsonl', 'a') as sink:
+        for item in items:
+            results[item['id']] = fetch_paid_provider(item)
+        for item in items:
+            sink.write(str(results[item['id']]) + '\\n')
+""")
+ok("a context-wrapped final flush remains a violation",
+   rc == 1 and 'DURABILITY MISSING' in out, f"rc={rc}; {out[:220]}")
+
+# 17. Provider-yielded rows are fresh work even beneath a durable-store read.
+rc, out, err = run_lint("""
+import json
+def run(results_by_vat):
+    for line in open('checkpoint.jsonl', encoding='utf-8'):
+        record = json.loads(line)
+        for person in fetch_company_results(record):
+            results_by_vat.setdefault(person['id'], []).append(person)
+""")
+ok("a provider iterator beneath a read loop still requires persistence",
+   rc == 1 and 'DURABILITY MISSING' in out, f"rc={rc}; {out[:220]}")
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

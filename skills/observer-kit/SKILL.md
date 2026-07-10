@@ -112,6 +112,11 @@ For a phase-batched pipeline, persist each finalized item or bounded chunk as
 soon as that phase produces authoritative output. Resume reads that same store
 and selects the remaining work.
 
+When one bounded unit uses internal pagination, keep the accumulator scoped to
+that unit and persist it immediately after its final page, before the next unit
+begins. Startup replay may rebuild working maps from this durable store; that
+read restores completed work and preserves the existing checkpoint.
+
 **Complete when:** stopping the process one line before its final statement
 loses at most the active item or bounded chunk, and resume selects remaining
 work while preserving confirmed spend and writes.

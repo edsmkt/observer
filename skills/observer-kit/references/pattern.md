@@ -202,6 +202,12 @@ When an API returns authoritative batches, persist each bounded response before
 submitting the next batch. Progress events provide liveness; the saved result
 provides durability.
 
+When one bounded unit becomes authoritative only after internal pagination,
+keep only that active unit in memory and persist it immediately after its final
+page, before starting the next unit. On resume, replay persisted units into the
+working maps, then select and execute only the remaining units. Replay is a read
+from the authoritative durable store and retains the existing checkpoint.
+
 Run `references/lint_emit.py` against every agent-written batch script. It checks
 for final record flushes and for result containers that advance while the script
 offers progress events in place of a durable sink. Treat its zero exit as one
