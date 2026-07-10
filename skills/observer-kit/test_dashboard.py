@@ -184,6 +184,10 @@ with tempfile.TemporaryDirectory(prefix='rgdash-') as state:
        'const previous=row.__prev?.[c];' in dashboard.PAGE and 'was ${esc(fmt(previous))}' in dashboard.PAGE)
     ok("completed runs surface reported credit spend without custom dashboard wiring",
        "'sheet_rows_appended','credits_spent','errors'" in dashboard.PAGE)
+    ok("selected summary metrics advance from live metric events",
+       'metricValues=Object.create(null)' in dashboard.PAGE and
+       "if(a==='metric'&&e.metric)" in dashboard.PAGE and
+       'const summaryValues=fin||metricValues;' in dashboard.PAGE)
     ok("nested terminal outcome totals remain visible as bounded headline metrics",
        'function numericSummaryEntries(value' in dashboard.PAGE and
        'numericSummaryEntries(fin).slice(0,8)' in dashboard.PAGE and

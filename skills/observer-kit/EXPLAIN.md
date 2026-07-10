@@ -61,10 +61,12 @@ the remaining examples before operator review.
 
 ## Dashboard view
 
+- Operator decision: [what the sample helps the user decide]
 - Tables and stable keys: [table -> key]
 - Projected columns: [fields chosen from the observed schema for the user's objective]
 - Headline metrics: [three to five scalar counters covering material outcomes]
 - Outcome coverage: [planned/write, skip, hold, missing, failure]
+- Attention or pause rules: [conditions the user wants surfaced or paused]
 - Progress source: [source table or item count]
 - Attention signal: [the explicit `error` field and its meaning]
 

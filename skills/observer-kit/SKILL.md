@@ -86,7 +86,7 @@ verification branch has a recorded trigger reason.
 
 ## 3. Propose The Operator View
 
-Propose a compact dashboard shape before wiring records:
+Derive a compact initial dashboard shape from the mapped workflow and observed schema:
 
 - tables and stable keys;
 - source, transformation, reasoning, outcome, destination, and `error` fields,
@@ -97,16 +97,16 @@ Propose a compact dashboard shape before wiring records:
 - whether later enrichment updates these rows or opens a comparison lane;
 - the selected verification branch IDs and their trigger reasons.
 
-Invite the user to inspect the sample JSON, choose columns, and edit the proposal.
+A cold-start agent owns the initial proposal, then asks concise questions about decisions, fields, metrics, attention rules, limits, and lane; the user refines it from the sample.
 Set concise attention errors; healthy and expected outcomes emit `error=''`.
 
-**Complete when:** the user can picture the tables, columns, counters, sample, and lane.
+**Complete when:** the user can picture the view and every unresolved operator choice has an answer.
 
 ## 4. Wire The Harness
 
 Use `start_observed_run()` around the real job and pass the actual `source=`,
 `dry_run`, `description`, `todo`, `progress_table`, and concise
-`summary_metrics` whose keys become scalar terminal counters.
+`summary_metrics` whose keys advance through `run.count()` and become scalar terminal counters.
 
 Apply the production contracts from `references/pattern.md`:
 

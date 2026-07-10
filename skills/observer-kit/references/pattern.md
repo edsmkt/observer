@@ -165,8 +165,8 @@ approval contracts.
 
 ## Operator View And Record Identity
 
-The dashboard is generic. Design tables from the user's entities rather than
-from Observer Kit's examples.
+The dashboard is workflow-specific. Treat Observer Kit examples as illustrations
+and derive tables from the user's actual entities, effects, and review needs.
 
 For an API, database, CRM, or other remote source, begin the dry run with one
 bounded read that reaches the real endpoint and returns representative entities.
@@ -188,9 +188,22 @@ become `[REDACTED]`; `sensitive_fields` adds provider-specific names. Use one
 entity per sample row. Governed or very large responses stay in their governed
 store and use a small representative object plus `payload_ref` in the ledger.
 
-Choose projected columns from the observed fields and the user's objective.
-Present that projection beside the raw samples and let the user ask for changes
-through the JSON cell, a column header, or the run chat before full execution.
+A cold-start agent produces the complete initial projection from mapped evidence
+and the user's objective. Present it beside raw samples; the user refines it
+through the JSON cell, a column header, or run chat before full execution.
+
+Ask two to five concise questions after presenting that recommendation. Choose
+questions whose answers change the workflow or operator view:
+
+- What decision should the sample help the user make before full execution?
+- Which entities, response fields, reasoning, and headline metrics must stay visible?
+- Which outcomes belong in Attention or should pause further work?
+- What spend, write, quality, and rate limits apply, and what proves destination success?
+- Should later enrichment update this lane or open a comparison lane?
+
+Resolve source identities, stable keys, API shapes, and script mechanics through
+inspection. Record the user's answers in the Dashboard view, boundaries, and
+lane sections of `EXPLAIN.md`, then wire and prove that agreed proposal.
 
 Every business row uses:
 
@@ -225,8 +238,8 @@ outcome on the same business row so `pending` changes to `appended`, `updated`,
 `inserted`, `skipped`, or `failed` in one column.
 
 Choose three to five `summary_metrics` that answer the operator's main questions.
-Each selected key maps to a scalar numeric field on `run_finished`, `run_failed`,
-`run_paused`, or `run_abandoned`. Emit additional counters for audit value while
+Advance each selected key with `run.count()` during work; it maps to a scalar
+numeric field on the terminal event. Emit additional counters for audit value while
 keeping the headline strip compact. Reconcile each material outcome counter with
 the folded record rows during the sample.
 

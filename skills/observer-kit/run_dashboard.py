@@ -1395,7 +1395,7 @@ function renderStats(){
   // counts (e.g. "62 linkedin", "5 fallback"). Per-provider credits and errors always
   // show (any run can spend or fail). Enrichment runs (phone/email events) keep their
   // familiar chips as a fallback.
-  const prov=Object.create(null); let errors=0;
+  const prov=Object.create(null), metricValues=Object.create(null); let errors=0;
   const recByTable=Object.create(null);   // table -> {key -> merged row}
   let enrichRun=false; const s={phones:0,emails:0,misses:0,writes:0,assoc:0};
   const events=attemptEvents();
@@ -1420,6 +1420,11 @@ function renderStats(){
       const used=e.used??e.credits_consumed, left=e.left??e.credits_left;
       if(used!==undefined)c.used=used;
       if(left!==undefined)c.left=left;
+    }
+    if(a==='metric'&&e.metric){
+      const name=String(e.metric);
+      if(e.value!==undefined)metricValues[name]=e.value;
+      else if(e.increment!==undefined)metricValues[name]=(metricValues[name]||0)+Number(e.increment);
     }
     if(e.endpoint&&/POST|PATCH|PUT|DELETE/.test(e.endpoint)&&!/search/i.test(e.endpoint)&&e.status_code<300)s.writes++;
     if(/associat/i.test(e.endpoint||'')&&e.status_code<300)s.assoc++;
@@ -1450,24 +1455,34 @@ function renderStats(){
     if(statusCounts.running)chips.push(['running',statusCounts.running,'warn']);
     if(statusCounts.attention)chips.push(['needs attention',statusCounts.attention,'err']);
     const summaryStart=chips.length;
-    if(fin&&wantedSummary.length){
+    if(wantedSummary.length){
+      const summaryValues=fin||metricValues;
       for(const item of wantedSummary){
         const key=typeof item==='string'?item:item.key;
         const label=typeof item==='string'?key.replace(/_/g,' '):(item.label||key.replace(/_/g,' '));
-        pushMetric(label, fin[key], item.cls||outcomeClass(key)||'ok');
+        pushMetric(label, summaryValues[key], item.cls||outcomeClass(key)||'ok');
       }
-    }else if(fin){
+    }
+    if(fin&&!wantedSummary.length){
       const defaults=['processed','qualified','saas_true','emails_enriched','sheet_rows_appended','credits_spent','errors'];
       for(const key of defaults){
         if(fin[key]!==undefined)pushMetric(key.replace(/_/g,' '),fin[key],key==='errors'?'err':'ok');
       }
-      if(chips.length===summaryStart){
-        for(const [path,value] of numericSummaryEntries(fin).slice(0,8))
-          pushMetric(path.replace(/_/g,' '),value,outcomeClass(path)||'ok');
-      }
-    }else{
+    }
+    if(fin&&chips.length===summaryStart){
+      for(const [path,value] of numericSummaryEntries(fin).slice(0,8))
+        pushMetric(path.replace(/_/g,' '),value,outcomeClass(path)||'ok');
+    }
+    if(!fin&&chips.length===summaryStart){
       const primary=recTab&&recByTable[recTab]?recTab:tables[0];
       if(primary)pushMetric(`${primary} rows`, Object.keys(recByTable[primary]).length);
+    }
+  } else if(wantedSummary.length&&(fin||Object.keys(metricValues).length)){
+    const summaryValues=fin||metricValues;
+    for(const item of wantedSummary){
+      const key=typeof item==='string'?item:item.key;
+      const label=typeof item==='string'?key.replace(/_/g,' '):(item.label||key.replace(/_/g,' '));
+      pushMetric(label,summaryValues[key],item.cls||outcomeClass(key)||'ok');
     }
   } else if(progressEvents().length){
     const progress=progressEvents();

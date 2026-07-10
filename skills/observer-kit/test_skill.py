@@ -105,11 +105,25 @@ ok('cold-start agents create new workflows or adapt unfamiliar scripts',
    all(term in skill_words for term in (
        'for new work, inspect the source and destination contracts first',
        'Create new logic and CLI or preserve existing ones while wiring these paths for optimum operator visibility',
+       'A cold-start agent owns the initial proposal, then asks concise questions',
        'observed schema, projected columns',
        'Emit every material outcome as a stable entity or phase row',
        'each slow phase emits a record before its terminal event')) and
-   'unfamiliar existing scripts after tracing their actual CLI and work paths'
-   in ' '.join(pattern.split()))
+   all(term in ' '.join(pattern.split()) for term in (
+       'unfamiliar existing scripts after tracing their actual CLI and work paths',
+       'Treat Observer Kit examples as illustrations',
+       'A cold-start agent produces the complete initial projection from mapped evidence')))
+ok('operator questions refine evidence-backed defaults',
+   all(term in skill_words for term in (
+       'decisions, fields, metrics, attention rules, limits, and lane',
+       'every unresolved operator choice has an answer')) and
+   all(term in ' '.join(pattern.split()) for term in (
+       'Ask two to five concise questions after presenting that recommendation',
+       'What decision should the sample help the user make',
+       'Which outcomes belong in Attention or should pause further work',
+       "Record the user's answers")) and
+   all(term in ' '.join(explain.split()) for term in (
+       'Operator decision', 'Attention or pause rules')))
 
 prove_match = re.search(r'^## 5\. Prove The Sample\n(.*?)(?=^## 6\.)',
                         skill, re.MULTILINE | re.DOTALL)
@@ -160,8 +174,10 @@ ok('material outcomes have rows and scalar headline totals',
    'scalar headline metrics covering the material outcomes' in propose_words and
    'stratified dry-run sample across planned, write, skip, hold, missing, and failure outcomes' in propose_words and
    'Emit every material outcome as a stable entity or phase row' in wire_words and
+   'summary_metrics` whose keys advance through `run.count()`' in wire_words and
    'scalar headline counts reconcile with stratified write, skip, hold, missing, and failure rows' in prove_words and
-   'Each selected key maps to a scalar numeric field' in pattern_words and
+   'Advance each selected key with `run.count()` during work' in pattern_words and
+   'maps to a scalar numeric field on the terminal event' in pattern_words and
    'Outcome coverage' in explain_words)
 ok('sample verification separates universal proof from active branches',
    'verify this universal minimum' in prove_words and
