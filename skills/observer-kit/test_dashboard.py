@@ -141,6 +141,9 @@ with tempfile.TemporaryDirectory(prefix='rgdash-') as state:
 
     ok("record headers remain below the table controls and only reserve subtabs when present",
        '.recordshell th{top:41px}' in dashboard.PAGE and '.recordshell.hasSubtabs th{top:84px}' in dashboard.PAGE)
+    ok("table controls mask rows after horizontal scrolling",
+       '.tableTools{position:sticky;top:0;left:0;' in dashboard.PAGE and
+       '.filterPanel{position:sticky;top:41px;left:0;' in dashboard.PAGE)
     ok("table tabs stay visible during horizontal inspection", '.subtabs{position:sticky;top:0;left:0;' in dashboard.PAGE)
     ok("record tables use explicit head and body sections", '<thead><tr>' in dashboard.PAGE and '<tbody>' in dashboard.PAGE)
     ok("record maps safely accept special table and key names", 'Object.create(null)' in dashboard.PAGE and 'function hasOwn(obj,key)' in dashboard.PAGE)
@@ -200,7 +203,13 @@ with tempfile.TemporaryDirectory(prefix='rgdash-') as state:
        "case 'schema_observed'" in dashboard.PAGE and 'JSON field paths' in dashboard.PAGE)
     ok("live data updates preserve the operator's table position",
        'function captureTableScroll()' in dashboard.PAGE and 'function restoreTableScroll(state)' in dashboard.PAGE and
-       'restoreTableScroll(tableScroll);' in dashboard.PAGE)
+       'const latestScroll=captureTableScroll();' in dashboard.PAGE and
+       'content.replaceChildren(shell);' in dashboard.PAGE and
+       'restoreTableScroll(latestScroll);' in dashboard.PAGE and
+       'if(html!==null){' in dashboard.PAGE)
+    ok("large table refreshes keep the current table until the replacement is complete",
+       dashboard.PAGE.index('const latestScroll=captureTableScroll();') < dashboard.PAGE.index('content.replaceChildren(shell);') and
+       dashboard.PAGE.index('content.replaceChildren(shell);') < dashboard.PAGE.index('restoreTableScroll(latestScroll);'))
     ok("record tables provide typed multi-column filters",
        "function filterKind(rows,column)" in dashboard.PAGE and 'function rowsMatchFilters(rows, table)' in dashboard.PAGE and
        'does not contain' in dashboard.PAGE and 'greater than or equal to' in dashboard.PAGE and
@@ -218,6 +227,34 @@ with tempfile.TemporaryDirectory(prefix='rgdash-') as state:
     ok("large fresh ledgers catch up without a two-second pause between chunks",
        "'more': has_more_events(run_id, new_offsets)" in open(RUN_DASHBOARD, encoding='utf-8').read() and
        'setTimeout(poll,more?0:2000);' in dashboard.PAGE)
+    ok("flow runs reveal a dedicated visual graph tab",
+       'id=tabFlow style="display:none"' in dashboard.PAGE and
+       "eventName(e)==='flow_graph'" in dashboard.PAGE and
+       "document.getElementById('tabFlow').style.display=hasFlow?'block':'none'" in dashboard.PAGE)
+    ok("flow graph state is reconstructed from explicit graph node and unit events",
+       "kind==='flow_node'" in dashboard.PAGE and "kind==='flow_unit'" in dashboard.PAGE and
+       'function flowModel()' in dashboard.PAGE and 'function renderFlow(viewScroll)' in dashboard.PAGE and
+       "['complete','completed','done','finished'" in dashboard.PAGE)
+    ok("flow node cards expose universal outcomes instead of ambiguous routing language",
+       all(label in dashboard.PAGE for label in ('succeeded</small>', 'skipped</small>', 'held</small>', 'failed</small>')) and
+       'diverted</small>' not in dashboard.PAGE)
+    ok("batch flow events remain row-oriented while exposing bounded request activity",
+       "case 'flow_batch'" in dashboard.PAGE and "kind==='flow_batch'" in dashboard.PAGE and
+       'Batch calls · ${selectedBatches.length}' in dashboard.PAGE and 'saved_units' in dashboard.PAGE and
+       'reused response' in dashboard.PAGE)
+    ok("flow row totals come from landed business records instead of active-node membership",
+       'const businessKeys=new Set(recordEvents()' in dashboard.PAGE and
+       'observedRows=Math.max(allKeys.size,businessKeys.size)' in dashboard.PAGE and
+       '<b>${rowMetric}</b><small>rows observed</small>' in dashboard.PAGE)
+    ok("flow view exposes live nodes branches and per-row traces",
+       'class=flowGraph id=flowGraph' in dashboard.PAGE and 'function drawFlowEdges()' in dashboard.PAGE and
+       'Rows at this node' in dashboard.PAGE and 'Latest durable path for this row' in dashboard.PAGE)
+    ok("flow definitions and current row projections remain inspectable as JSON",
+       'Inspect node JSON' in dashboard.PAGE and 'Inspect row JSON' in dashboard.PAGE and
+       'function showFlowJson(title,value)' in dashboard.PAGE)
+    ok("live flow updates preserve the operator's vertical position",
+       "const flowScroll=view==='flow'?content.scrollTop:null;" in dashboard.PAGE and
+       'if(viewScroll!==null&&viewScroll!==undefined)content.scrollTop=viewScroll;' in dashboard.PAGE)
 
 print(f"\n{passed} passed, {failed} failed")
 raise SystemExit(1 if failed else 0)

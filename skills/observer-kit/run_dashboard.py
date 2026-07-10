@@ -435,12 +435,12 @@ h3{margin:10px 0 8px;font-size:11px;color:var(--dim);text-transform:uppercase;le
 .card .row small{color:var(--dim)}
 .recordshell{height:calc(100vh - 214px);overflow:auto;border-radius:10px;background:var(--card);border:1px solid var(--line)}
 .recordshell .tablewrap{overflow:visible;max-height:none;border-radius:0}
-.tableTools{position:sticky;top:0;z-index:8;display:flex;align-items:center;gap:7px;flex-wrap:wrap;padding:8px 10px;background:#151c24;border-bottom:1px solid var(--line)}
+.tableTools{position:sticky;top:0;left:0;z-index:8;display:flex;align-items:center;gap:7px;flex-wrap:wrap;padding:8px 10px;background:#151c24;border-bottom:1px solid var(--line)}
 .filterToggle,.filterChip,.filterAction{background:#202a35;color:var(--txt);border:1px solid #344355;border-radius:7px;padding:5px 9px;cursor:pointer;font:12px -apple-system,"Segoe UI",sans-serif}
 .filterToggle:hover,.filterAction:hover{background:#2b3948;border-color:#4d6580}
 .filterChip{display:inline-flex;align-items:center;gap:5px;color:var(--dim);cursor:default}.filterChip button{border:0;background:transparent;color:var(--dim);padding:0;cursor:pointer;font-size:15px;line-height:1}.filterChip button:hover{color:var(--txt)}
 .filterGroup{display:inline-flex;align-items:center;gap:5px;padding:4px 5px;border:1px solid #425063;border-radius:7px;background:#1a2530}.filterGroup small{color:var(--dim);white-space:nowrap}.filterJoin{font-size:10px;color:var(--info)}
-.filterPanel{position:sticky;top:41px;z-index:8;display:grid;grid-template-columns:minmax(120px,1fr) minmax(112px,.8fr) minmax(105px,1fr) minmax(105px,1fr) minmax(130px,1fr) auto;gap:7px;align-items:center;padding:8px 10px;background:#121920;border-bottom:1px solid var(--line)}
+.filterPanel{position:sticky;top:41px;left:0;z-index:8;display:grid;grid-template-columns:minmax(120px,1fr) minmax(112px,.8fr) minmax(105px,1fr) minmax(105px,1fr) minmax(130px,1fr) auto;gap:7px;align-items:center;padding:8px 10px;background:#121920;border-bottom:1px solid var(--line)}
 .filterPanel select,.filterPanel input{min-width:0;width:100%;background:#0d1114;color:var(--txt);border:1px solid #344355;border-radius:6px;padding:6px 8px;font:12px -apple-system,"Segoe UI",sans-serif}
 .filterPanel input:last-of-type[data-hidden="true"]{display:none}
 @media(max-width:720px){.filterPanel{grid-template-columns:1fr 1fr}.filterPanel .filterAction{grid-column:span 2}}
@@ -484,6 +484,38 @@ tr:hover td:first-child{background:#232c36}
 .tabs{display:flex;gap:8px}
 .tab{padding:5px 14px;border-radius:7px;background:var(--card);cursor:pointer;font-size:13px}
 .tab.sel{background:#314052}
+.flowShell{display:flex;flex-direction:column;gap:12px;min-height:100%}
+.flowHead{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;padding:2px 2px 10px;border-bottom:1px solid var(--line)}
+.flowTitle{font-size:18px;font-weight:760;line-height:1.2}.flowSub{color:var(--dim);font-size:12.5px;margin-top:3px}
+.flowPlan{font:11.5px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--dim);text-align:right;max-width:310px;overflow-wrap:anywhere}
+.flowSummary{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:8px}
+.flowMetric{border:1px solid var(--line);border-radius:8px;padding:9px 11px;background:#151c23;min-height:62px}
+.flowMetric b{display:block;font-size:17px;line-height:1.2}.flowMetric small{color:var(--dim);font-size:11.5px}
+.flowCanvas{position:relative;overflow:auto;min-height:318px;border:1px solid var(--line);border-radius:8px;background:#12181e}
+.flowGraph{position:relative;display:grid;grid-auto-flow:column;grid-auto-columns:220px;gap:74px;align-items:stretch;min-width:max-content;min-height:316px;padding:30px 34px}
+.flowLevel{display:flex;flex-direction:column;justify-content:space-around;gap:16px;position:relative;z-index:2}
+.flowEdges{position:absolute;inset:0;width:100%;height:100%;z-index:1;pointer-events:none;overflow:visible}
+.flowNode{width:220px;min-height:158px;border:1px solid #35414e;border-left:4px solid #566576;border-radius:8px;background:#1b232b;padding:11px;cursor:pointer;box-shadow:0 8px 20px rgba(0,0,0,.18);transition:border-color .16s,background .16s,transform .16s}
+.flowNode:hover{background:#222c35;border-color:#526173;transform:translateY(-1px)}
+.flowNode.selected{outline:2px solid #d7e7f5;outline-offset:2px}.flowNode.running{border-left-color:var(--warn)}.flowNode.complete{border-left-color:var(--ok)}.flowNode.failed{border-left-color:var(--err)}.flowNode.held{border-left-color:#d69b63}.flowNode.pending{border-left-color:#566576}
+.flowNode.running .flowNodeIcon{animation:flowPulse 1.5s ease-in-out infinite}@keyframes flowPulse{50%{box-shadow:0 0 0 5px rgba(229,185,90,.12)}}
+.flowNodeTop{display:flex;align-items:center;gap:9px}.flowNodeIcon{width:30px;height:30px;flex:0 0 30px;border-radius:7px;display:grid;place-items:center;background:#26323d;color:#dce8f2;font:700 12px/1 ui-monospace,monospace}
+.flowNodeName{font-size:13.5px;font-weight:720;line-height:1.2;overflow-wrap:anywhere}.flowNodeKind{font-size:10.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;margin-top:2px}
+.flowState{margin-left:auto;font-size:10.5px;border-radius:99px;padding:2px 7px;background:#28323c;color:var(--dim);white-space:nowrap}.flowState.running{background:#3a331d;color:var(--warn)}.flowState.complete{background:#1d3a2b;color:var(--ok)}.flowState.failed{background:#3a221d;color:var(--err)}.flowState.held{background:#3d2f25;color:#e5ab72}
+.flowBar{height:4px;background:#0e1419;border-radius:99px;overflow:hidden;margin:11px 0 5px}.flowBar span{display:block;height:100%;background:var(--ok);transition:width .2s}.flowNode.running .flowBar span{background:var(--warn)}.flowNode.failed .flowBar span{background:var(--err)}
+.flowProgressLine{font-size:9.5px;color:var(--dim);margin-bottom:7px;font-variant-numeric:tabular-nums}
+.flowNodeStats{display:grid;grid-template-columns:repeat(4,1fr);gap:4px}.flowNodeStats b{display:block;font-size:12.5px}.flowNodeStats small{display:block;color:var(--dim);font-size:8.5px;white-space:nowrap}
+.flowEdgeLabel{fill:#9aa7b4;font:10px -apple-system,'Segoe UI',sans-serif;paint-order:stroke;stroke:#12181e;stroke-width:5px;stroke-linejoin:round}
+.flowInspector{display:grid;grid-template-columns:minmax(260px,.85fr) minmax(420px,1.6fr);border:1px solid var(--line);border-radius:8px;background:#151c23;overflow:hidden}
+.flowDetail{padding:14px;border-right:1px solid var(--line)}.flowDetail h4,.flowRows h4{font-size:13.5px;margin:0 0 8px}.flowMeta{font-size:12px;color:var(--dim);margin-bottom:10px}
+.flowPorts{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 11px}.flowPort{font:10.5px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace;padding:4px 6px;border-radius:5px;background:#222c35;color:#cbd7e2}.flowPort.out{background:#203429;color:#8ed6ad}
+.flowBatches{margin:11px 0}.flowBatchList{display:flex;flex-direction:column;gap:5px;max-height:144px;overflow:auto;margin-top:6px}.flowBatch{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 8px;padding:6px 7px;border:1px solid #2a3540;border-radius:6px;background:#192129}.flowBatch b{font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.flowBatch span{font-size:10px;color:var(--dim);white-space:nowrap}.flowBatch small{grid-column:1/-1;color:var(--dim);font-size:9.5px}
+.flowRows{min-width:0;padding:14px}.flowUnitList{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;max-height:202px;overflow:auto}
+.flowUnit{display:flex;align-items:center;gap:8px;border:1px solid #2a3540;border-radius:7px;padding:7px 8px;background:#192129;cursor:pointer;min-width:0}.flowUnit:hover,.flowUnit.selected{border-color:#53677a;background:#222c35}.flowUnitKey{font-size:11.5px;font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}.flowUnitState{font-size:10.5px;color:var(--dim)}
+.flowTrace{grid-column:1/-1;border-top:1px solid var(--line);padding:13px 14px}.flowTraceHead{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:9px}.flowTracePath{display:flex;gap:7px;align-items:stretch;overflow-x:auto;padding-bottom:3px}.flowTraceStep{min-width:142px;max-width:190px;border:1px solid #2c3742;border-radius:7px;padding:7px 8px;background:#192129}.flowTraceStep b{display:block;font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.flowTraceStep small{font-size:10.5px;color:var(--dim)}.flowTraceArrow{align-self:center;color:#576573}
+.flowStatusDot{width:7px;height:7px;border-radius:50%;display:inline-block;background:#66717d;margin-right:5px}.flowStatusDot.complete,.flowStatusDot.succeeded,.flowStatusDot.accepted{background:var(--ok)}.flowStatusDot.running{background:var(--warn)}.flowStatusDot.failed{background:var(--err)}.flowStatusDot.held{background:#e5ab72}
+@media(max-width:900px){.flowSummary{grid-template-columns:1fr 1fr}.flowInspector{grid-template-columns:1fr}.flowDetail{border-right:0;border-bottom:1px solid var(--line)}}
+@media(max-width:600px){.flowHead{flex-direction:column}.flowPlan{text-align:left}.flowUnitList{grid-template-columns:1fr}.flowGraph{grid-auto-columns:205px;gap:58px;padding:24px}.flowNode{width:205px}.flowSummary{grid-template-columns:1fr 1fr}}
 label{color:var(--dim);font-size:12.5px;margin-left:auto;align-self:center;cursor:pointer}
 input[type=text]{width:100%;background:#0d1114;color:var(--txt);border:1px solid var(--line);border-radius:7px;padding:6px 10px;margin-bottom:8px;font-size:13px}
 .lock{padding:6px 10px;border-radius:7px;margin-bottom:4px;background:var(--card);font-size:12.5px}
@@ -519,6 +551,7 @@ th[data-col]:hover,td[data-col]:hover{outline:1px solid #34506e;outline-offset:-
   <div id=topbar>
     <div class=tabs>
       <div class="tab sel" id=tabRecords onclick="view='records';render()">Data</div>
+      <div class=tab id=tabFlow style="display:none" onclick="view='flow';render()">Flow</div>
       <div class=tab id=tabAttention onclick="view='attention';render()">Attention</div>
       <div class=tab id=tabFeed onclick="view='feed';render()">Timeline</div>
       <div class=tab id=tabInfo onclick="view='info';render()">Run info</div>
@@ -547,6 +580,7 @@ th[data-col]:hover,td[data-col]:hover{outline:1px solid #34506e;outline-offset:-
 </div>
 <script>
 let sel=null, offsets={}, all=[], view='records', chatByAnchor={}, chatOpenAnchor=null, pendingControl=null, controls=[], colW={}, recTab=null, currentLocks=[], _buildAbort=null;
+let flowNodeSelected=null,flowRowSelected=null,_flowVersion=0,_lastFlowVersion=-1;
 let tableFilters=Object.create(null), filterOpen=null, filterDraft=null, _filterVersion=0;
 let _eventCount=-1, _lastView=null, _lastSel=null, _lastRecTab=null, _lastFilterVersion=-1, _recGroupsCache=null, _recGroupsVer=0;
 function setRecTab(t){recTab=t;render();}
@@ -1058,14 +1092,15 @@ function renderRecordTable(groups, gorder, label){
   // small tables (≤500 rows): build in one shot
   if(rowKeys.length<=500)
     return `${label?`<div class=card><h4>${esc(label)}</h4></div>`:''}<div class="recordshell${hasSubtabs?' hasSubtabs':''}${filterOpen===recTab?' filtersOpen':''}" style="height:${contentViewportHeight()}px">${subtabs}${tools}<div class=tablewrap><table style="width:${gtot}px">${thead}<tbody>${rowKeys.map(rrow).join('')}</tbody></table></div></div>`;
-  // large tables: write shell + thead immediately, stream tbody rows via setTimeout
-  _buildAbort && _buildAbort();
+  // Large tables build off-screen in chunks. Keep the current table interactive
+  // until the replacement is complete, then swap once and restore its latest
+  // viewport. Restoring against an empty tbody clamps scrollTop to zero.
   const shell=document.createElement('div');
   shell.innerHTML=`${label?`<div class=card><h4>${esc(label)}</h4></div>`:''}<div class="recordshell${hasSubtabs?' hasSubtabs':''}${filterOpen===recTab?' filtersOpen':''}" style="height:${contentViewportHeight()}px">${subtabs}${tools}<div class=tablewrap><table style="width:${gtot}px">${thead}<tbody></tbody></table></div></div>`;
-  content.replaceChildren(shell);
   const tbody=shell.querySelector('.tablewrap tbody');
   let aborted=false;
-  _buildAbort=()=>{aborted=true};
+  const abort=()=>{aborted=true};
+  _buildAbort=abort;
   const BATCH=500;let idx=0;
   function appendBatch(){
     if(aborted)return;
@@ -1074,9 +1109,15 @@ function renderRecordTable(groups, gorder, label){
     for(; idx<end; idx++)rows+=rrow(rowKeys[idx]);
     tbody.insertAdjacentHTML('beforeend', rows);
     if(idx<rowKeys.length)setTimeout(appendBatch, 0);
-    else decorateChat();
+    else {
+      if(_buildAbort===abort)_buildAbort=null;
+      const latestScroll=captureTableScroll();
+      content.replaceChildren(shell);
+      decorateChat();
+      restoreTableScroll(latestScroll);
+    }
   }
-  setTimeout(appendBatch, 0);
+  appendBatch();
   return null; // chunked — caller skips content.innerHTML assignment
 }
 // A column is "categorical" (worth coloring + counting) if it repeats values and
@@ -1136,6 +1177,10 @@ function humanize(e){
     case 'control_acknowledged': return {icon:'•',cls:'info',text:`Control acknowledged — ${esc(String(e.control||'').replaceAll('_',' '))}`};
     case 'simulation': return {icon:'◌',cls:'info',text:`Simulation fixture loaded — ${esc(e.records??0)} records`};
     case 'schema_observed': return {icon:'{ }',cls:'info',text:`Observed ${Object.keys(e.paths||{}).length} JSON field paths for ${esc(e.table||'source data')} from ${esc(e.sample_count??1)} sample${e.sample_count===1?'':'s'}`};
+    case 'flow_graph': return {icon:'◇',cls:'info',text:`Flow plan loaded — ${esc(e.graph?.label||e.graph?.id||e.graph_id||'dependency graph')}${e.rows_total!==undefined?` · ${esc(e.rows_total)} rows`:''}`};
+    case 'flow_node': return {icon:e.status==='failed'?'!':e.status==='complete'?'✓':'↻',cls:e.status==='failed'?'err':e.status==='complete'?'ok':'info',text:`${esc(e.node_label||e.node_id||'Node')} — ${esc(flowStatusLabel(e.status))}${e.completed!==undefined&&e.total!==undefined?` · ${esc(e.completed)} / ${esc(e.total)}`:''}`};
+    case 'flow_batch': return {icon:e.status==='failed'?'!':'▦',cls:e.status==='failed'?'err':e.status==='complete'?'ok':'info',text:`${esc(e.node_label||e.node_id||'Batch node')} · batch ${esc(e.position||e.batch_id||'?')}${e.total_batches?` / ${esc(e.total_batches)}`:''} — ${esc(flowStatusLabel(e.status))}${e.items!==undefined?` · ${esc(e.items)} rows`:''}${e.spend_units!==undefined?` · ${esc(e.spend_units)} units`:''}`};
+    case 'flow_unit': return {icon:e.status==='failed'?'!':e.status==='held'?'Ⅱ':'·',cls:e.status==='failed'?'err':e.status==='held'?'warn':'dim',text:`${esc(e.node_label||e.node_id||'Node')} · ${esc(e.key||'row')} — ${esc(flowStatusLabel(e.status))}${e.reason?` <small>(${esc(e.reason)})</small>`:''}`,quiet:!['failed','held'].includes(String(e.status))};
     case 'progress': {
       const phase=esc(e.phase||'progress');
       const pct=(e.done!==undefined&&e.total)?` (${Math.round((Number(e.done)/Number(e.total))*100)}%)`:'';
@@ -1256,12 +1301,167 @@ function attemptBanner(){
     : '';
 }
 
+function flowStateClass(value){
+  const s=String(value||'pending').toLowerCase();
+  if(['complete','completed','done','finished','success','succeeded','cached','skipped'].includes(s))return 'complete';
+  if(s==='running'||s==='ready')return 'running';
+  if(s==='failed'||s==='error')return 'failed';
+  if(s==='held'||s==='paused')return 'held';
+  return 'pending';
+}
+function flowStatusLabel(value){
+  const s=String(value||'pending').replaceAll('_',' ');
+  return s.charAt(0).toUpperCase()+s.slice(1);
+}
+function flowModel(){
+  const events=attemptEvents();
+  const graphEvent=[...events].reverse().find(e=>eventName(e)==='flow_graph');
+  if(!graphEvent)return null;
+  const graph=graphEvent.graph||graphEvent;
+  const nodes=Array.isArray(graph.nodes)?graph.nodes:[];
+  const edges=Array.isArray(graph.edges)?graph.edges:[];
+  const states=Object.create(null), units=Object.create(null), batches=Object.create(null);
+  for(const node of nodes){
+    states[node.id]={node_id:node.id,status:'pending',total:Number(graphEvent.rows_total||graph.rows_total||0),succeeded:0,skipped:0,held:0,failed:0,cached:0,spend_units:0};
+    units[node.id]=Object.create(null);
+    batches[node.id]=Object.create(null);
+  }
+  for(const event of events){
+    const kind=eventName(event), id=event.node_id;
+    if(kind==='flow_node'&&id&&states[id])Object.assign(states[id],event);
+    if(kind==='flow_unit'&&id&&units[id]&&event.key!==undefined)units[id][String(event.key)]=event;
+    if(kind==='flow_batch'&&id&&batches[id]){
+      const batchId=String(event.batch_id||event.position||Object.keys(batches[id]).length+1);
+      batches[id][batchId]={...(batches[id][batchId]||{}),...event};
+    }
+  }
+  for(const node of nodes){
+    const state=states[node.id], rows=Object.values(units[node.id]);
+    if(rows.length){
+      for(const key of ['succeeded','skipped','held','failed','cached']){
+        if(state[key]===undefined||state.derived_counts)state[key]=rows.filter(row=>String(row.status)===key).length;
+      }
+      const terminal=rows.filter(row=>['succeeded','skipped','held','failed','cached'].includes(String(row.status))).length;
+      state.completed=Math.max(Number(state.completed||0),terminal);
+    }
+    state.total=Number(state.total||graphEvent.rows_total||graph.rows_total||0);
+  }
+  return {graphEvent,graph,nodes,edges,states,units,batches};
+}
+function flowLevels(nodes,edges){
+  const ids=new Set(nodes.map(n=>n.id)), incoming=Object.create(null), level=Object.create(null);
+  for(const id of ids){incoming[id]=[];level[id]=0;}
+  for(const edge of edges)if(ids.has(edge.from)&&ids.has(edge.to))incoming[edge.to].push(edge.from);
+  for(let pass=0;pass<nodes.length;pass++){
+    let changed=false;
+    for(const node of nodes){
+      const next=incoming[node.id].length?Math.max(...incoming[node.id].map(id=>level[id]+1)):0;
+      if(next!==level[node.id]){level[node.id]=next;changed=true;}
+    }
+    if(!changed)break;
+  }
+  const groups=[];
+  for(const node of nodes){const n=Math.min(level[node.id]||0,nodes.length);(groups[n]||(groups[n]=[])).push(node);}
+  return groups.filter(Boolean);
+}
+function flowIcon(kind){
+  return ({source:'IN',extract:'{}',transform:'ƒ',decision:'IF',enrichment:'API',batch:'▦',review:'?',route:'↳',sink:'OUT',join:'Σ',expand:'1:N'})[String(kind||'').toLowerCase()]||'•';
+}
+function flowConditionText(node){
+  if(!node.when)return 'Runs when dependencies are ready';
+  if(typeof node.when==='string')return node.when;
+  const leaf=(node.when.all||node.when.any||[])[0];
+  if(leaf?.field)return `${leaf.field} ${String(leaf.op||'equals').replaceAll('_',' ')} ${leaf.value===undefined?'':JSON.stringify(leaf.value)}`.trim();
+  return JSON.stringify(node.when);
+}
+function selectFlowNode(id){flowNodeSelected=id;flowRowSelected=null;_flowVersion++;render();}
+function selectFlowRow(key){flowRowSelected=key;_flowVersion++;render();}
+function showFlowJson(title,value){
+  document.getElementById('cellmodalhead').textContent=title;
+  const body=document.getElementById('cellmodalbody');body.classList.add('json');body.textContent=JSON.stringify(value,null,2);
+  document.getElementById('cellmodal').classList.add('show');
+}
+function flowRecordFor(model,key){
+  const row=Object.create(null), table=model.graph.table||model.graphEvent.table;
+  for(const event of recordEvents()){
+    if(eventName(event)!=='record'||String(event.key)!==String(key))continue;
+    if(table&&event.table&&event.table!==table)continue;
+    for(const [field,value] of Object.entries(event))if(!['ts','event','action','_file','key','table','attempt','dry_run'].includes(field))row[field]=value;
+  }
+  return row;
+}
+let _flowEdges=[];
+function drawFlowEdges(){
+  const graph=document.getElementById('flowGraph'),svg=document.getElementById('flowEdges');
+  if(!graph||!svg)return;
+  const box=graph.getBoundingClientRect(),width=graph.scrollWidth,height=graph.scrollHeight,ns='http://www.w3.org/2000/svg';
+  svg.setAttribute('viewBox',`0 0 ${width} ${height}`);svg.setAttribute('width',width);svg.setAttribute('height',height);
+  svg.innerHTML='<defs><marker id="flowArrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#65798c"></path></marker></defs>';
+  const cards=[...graph.querySelectorAll('.flowNode')];
+  for(const edge of _flowEdges){
+    const from=cards.find(card=>card.dataset.nodeId===String(edge.from)),to=cards.find(card=>card.dataset.nodeId===String(edge.to));
+    if(!from||!to)continue;
+    const a=from.getBoundingClientRect(),b=to.getBoundingClientRect();
+    const x1=a.right-box.left,y1=a.top-box.top+a.height/2,x2=b.left-box.left,y2=b.top-box.top+b.height/2,mx=x1+(x2-x1)*.5;
+    const path=document.createElementNS(ns,'path');
+    path.setAttribute('d',`M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`);
+    path.setAttribute('fill','none');path.setAttribute('stroke','#65798c');path.setAttribute('stroke-width','1.6');path.setAttribute('marker-end','url(#flowArrow)');
+    svg.appendChild(path);
+    const label=edge.label||edge.when;
+    if(label){const text=document.createElementNS(ns,'text');text.setAttribute('x',mx);text.setAttribute('y',(y1+y2)/2-6);text.setAttribute('text-anchor','middle');text.setAttribute('class','flowEdgeLabel');text.textContent=String(label);svg.appendChild(text);}
+  }
+}
+function renderFlow(viewScroll){
+  const model=flowModel();
+  if(!model){content.innerHTML='<div class=empty>This run has no flow graph events.</div>';return;}
+  const {graphEvent,graph,nodes,edges,states,units,batches}=model;
+  if(!flowNodeSelected||!nodes.some(node=>node.id===flowNodeSelected)){
+    flowNodeSelected=nodes.find(node=>flowStateClass(states[node.id]?.status)==='running')?.id||nodes[0]?.id||null;
+  }
+  const selected=nodes.find(node=>node.id===flowNodeSelected),selectedState=selected?states[selected.id]:null;
+  const levels=flowLevels(nodes,edges),allKeys=new Set();
+  for(const byKey of Object.values(units))for(const key of Object.keys(byKey))allKeys.add(key);
+  const businessKeys=new Set(recordEvents().filter(e=>eventName(e)==='record'&&(!graph.table||!e.table||e.table===graph.table)).map(e=>String(e.key)));
+  const scopedRows=Number(graphEvent.rows_total||graph.rows_total||0),observedRows=Math.max(allKeys.size,businessKeys.size);
+  const rowMetric=scopedRows&&observedRows<scopedRows?`${observedRows}/${scopedRows}`:(observedRows||scopedRows);
+  const active=nodes.filter(node=>flowStateClass(states[node.id]?.status)==='running');
+  const spend=nodes.reduce((sum,node)=>sum+Number(states[node.id]?.spend_units||0),0);
+  const finished=nodes.filter(node=>flowStateClass(states[node.id]?.status)==='complete').length;
+  const nodeHtml=node=>{
+    const state=states[node.id]||{},cls=flowStateClass(state.status),total=Number(state.total||0),completed=Number(state.completed||0),pct=total?Math.min(100,Math.round(completed/total*100)):(cls==='complete'?100:0);
+    const succeeded=Number(state.succeeded||0)+Number(state.cached||0);
+    return `<div class="flowNode ${cls} ${node.id===flowNodeSelected?'selected':''}" data-node-id="${esc(node.id)}" onclick="selectFlowNode(${esc(JSON.stringify(node.id))})"><div class=flowNodeTop><div class=flowNodeIcon>${esc(flowIcon(node.kind||node.mode))}</div><div><div class=flowNodeName>${esc(node.label||node.id)}</div><div class=flowNodeKind>${esc(node.kind||node.mode||'node')} · v${esc(node.version||'1')}</div></div><span class="flowState ${cls}">${esc(flowStatusLabel(state.status))}</span></div><div class=flowBar><span style="width:${pct}%"></span></div><div class=flowProgressLine>${completed}/${total||'—'} processed</div><div class=flowNodeStats><span><b>${succeeded}</b><small>succeeded</small></span><span><b>${Number(state.skipped||0)}</b><small>skipped</small></span><span><b>${Number(state.held||0)}</b><small>held</small></span><span><b>${Number(state.failed||0)}</b><small>failed</small></span></div></div>`;
+  };
+  const graphHtml=levels.map(level=>`<div class=flowLevel>${level.map(nodeHtml).join('')}</div>`).join('');
+  const selectedUnits=selected?Object.values(units[selected.id]||{}).sort((a,b)=>String(b.ts||'').localeCompare(String(a.ts||''))):[];
+  const selectedBatches=selected?Object.values(batches[selected.id]||{}).sort((a,b)=>Number(b.position||0)-Number(a.position||0)):[];
+  if(flowRowSelected&&!selectedUnits.some(unit=>String(unit.key)===String(flowRowSelected)))flowRowSelected=null;
+  const unitHtml=selectedUnits.length?selectedUnits.slice(0,40).map(unit=>`<div class="flowUnit ${String(unit.key)===String(flowRowSelected)?'selected':''}" onclick="selectFlowRow(${esc(JSON.stringify(String(unit.key)))})"><span class="flowStatusDot ${esc(String(unit.status||'pending'))}"></span><span class=flowUnitKey title="${esc(unit.key)}">${esc(unit.key)}</span><span class=flowUnitState>${esc(flowStatusLabel(unit.status))}</span></div>`).join(''):'<div class=dim>No rows have reached this node yet.</div>';
+  const ports=selected?`<div class=flowMeta>${esc(flowConditionText(selected))}</div><small class=dim>Inputs</small><div class=flowPorts>${(selected.inputs||[]).map(port=>`<span class=flowPort>${esc(port)}</span>`).join('')||'<span class=dim>none</span>'}</div><small class=dim>Outputs</small><div class=flowPorts>${(selected.outputs||[]).map(port=>`<span class="flowPort out">${esc(port)}</span>`).join('')||'<span class=dim>none</span>'}</div>`:'';
+  const batchHtml=selectedBatches.length?`<div class=flowBatches><small class=dim>Batch calls · ${selectedBatches.length}</small><div class=flowBatchList>${selectedBatches.map(batch=>`<div class=flowBatch><b>${esc(batch.batch_id||`batch ${batch.position||'?'}`)}</b><span>${esc(flowStatusLabel(batch.status))}</span><small>${esc(batch.items||0)} rows · ${esc(batch.spend_units||0)} units${batch.saved_units!==undefined?` · ${esc(batch.saved_units)} saved`:''}${batch.reused_response?' · reused response':''}</small></div>`).join('')}</div></div>`:'';
+  let trace='<div class=dim>Select a row above to inspect its path through the graph.</div>';
+  if(flowRowSelected){
+    const steps=nodes.map((node,index)=>{const unit=units[node.id]?.[flowRowSelected],status=unit?.status||'pending';return `${index?'<span class=flowTraceArrow>→</span>':''}<div class=flowTraceStep><b><span class="flowStatusDot ${esc(String(status))}"></span>${esc(node.label||node.id)}</b><small>${esc(flowStatusLabel(status))}${unit?.reason?` · ${esc(unit.reason)}`:''}</small></div>`;}).join('');
+    const row=flowRecordFor(model,flowRowSelected);
+    trace=`<div class=flowTraceHead><div><b>${esc(flowRowSelected)}</b><div class=dim style="font-size:11.5px">Latest durable path for this row</div></div><button class=chatbtn onclick='showFlowJson(${esc(JSON.stringify(String(flowRowSelected)+" · row data"))},${esc(JSON.stringify(row))})'>Inspect row JSON</button></div><div class=flowTracePath>${steps}</div>`;
+  }
+  const plan=String(graphEvent.plan_id||graph.plan_id||'unversioned');
+  content.innerHTML=`<div class=flowShell><div class=flowHead><div><div class=flowTitle>${esc(graph.label||graph.id||'Observed flow')}</div><div class=flowSub>${esc(graph.description||'Live dependency graph and per-row execution state')}</div></div><div class=flowPlan>plan ${esc(plan.slice(0,18))}${plan.length>18?'…':''}<br>${esc(graphEvent.dry_run?'review sample':'full run')}</div></div><div class=flowSummary><div class=flowMetric><b>${rowMetric}</b><small>rows observed</small></div><div class=flowMetric><b>${active.length?esc(active.map(node=>node.label||node.id).join(', ')):'Idle'}</b><small>running now</small></div><div class=flowMetric><b>${finished}/${nodes.length}</b><small>nodes complete</small></div><div class=flowMetric><b>${spend}</b><small>spend units</small></div></div><div class=flowCanvas><div class=flowGraph id=flowGraph><svg class=flowEdges id=flowEdges aria-hidden=true></svg>${graphHtml}</div></div><div class=flowInspector><div class=flowDetail><h4>${esc(selected?.label||selected?.id||'Node')}</h4><div class=flowMeta>${esc(selected?.script||'')} ${selected?.recipe?`· recipe ${esc(selected.recipe)}`:''}</div>${ports}${batchHtml}<button class=chatbtn onclick='showFlowJson(${esc(JSON.stringify((selected?.label||selected?.id||"Node")+" · definition"))},${esc(JSON.stringify(selected||{}))})'>Inspect node JSON</button></div><div class=flowRows><h4>Rows at this node <span class=dim>· ${selectedUnits.length}</span></h4><div class=flowUnitList>${unitHtml}</div></div><div class=flowTrace>${trace}</div></div></div>`;
+  _flowEdges=edges;
+  requestAnimationFrame(()=>{drawFlowEdges();if(viewScroll!==null&&viewScroll!==undefined)content.scrollTop=viewScroll;});
+}
+
 function render(){
   // skip full re-render when no new events and same view — avoids rebuilding 15k-row table every 2s
-  if(all.length===_eventCount&&view===_lastView&&sel===_lastSel&&recTab===_lastRecTab&&_filterVersion===_lastFilterVersion)return;
+  if(all.length===_eventCount&&view===_lastView&&sel===_lastSel&&recTab===_lastRecTab&&_filterVersion===_lastFilterVersion&&_flowVersion===_lastFlowVersion)return;
+  _buildAbort && _buildAbort();
+  _buildAbort=null;
   const tableScroll=(view==='records'||view==='attention')?captureTableScroll():null;
-  _eventCount=all.length;_lastView=view;_lastSel=sel;_lastRecTab=recTab;_lastFilterVersion=_filterVersion;
-  for(const [v,id] of Object.entries({records:'tabRecords',attention:'tabAttention',feed:'tabFeed',info:'tabInfo',explain:'tabExplain'}))
+  const flowScroll=view==='flow'?content.scrollTop:null;
+  _eventCount=all.length;_lastView=view;_lastSel=sel;_lastRecTab=recTab;_lastFilterVersion=_filterVersion;_lastFlowVersion=_flowVersion;
+  const hasFlow=attemptEvents().some(e=>eventName(e)==='flow_graph');
+  document.getElementById('tabFlow').style.display=hasFlow?'block':'none';
+  for(const [v,id] of Object.entries({records:'tabRecords',flow:'tabFlow',attention:'tabAttention',feed:'tabFeed',info:'tabInfo',explain:'tabExplain'}))
     document.getElementById(id).classList.toggle('sel',view===v);
   const tech=document.getElementById('tech').checked;
   const mapped=all.map(e=>({e,h:humanize(e)}));
@@ -1283,10 +1483,15 @@ function render(){
 
   if(!sel){content.innerHTML='<div class=empty>Pick a run on the left. ● = running now.</div>';return}
 
+  if(view==='flow'){
+    renderFlow(flowScroll);
+    return;
+  }
+
   // run-level progress events (no per-record company+name) — kept OUT of the
   // table so a 10k-row run never buries them; shown in the Run info tab instead.
   const attemptMapped=attemptEvents().map(e=>({e,h:humanize(e)}));
-  const general=attemptMapped.filter(({e})=>!(e.company&&e.name)).filter(x=>tech||!x.h.technical);
+  const general=attemptMapped.filter(({e})=>!(e.company&&e.name)).filter(x=>!x.h.quiet).filter(x=>tech||!x.h.technical);
 
   if(view==='info'){
     let html=attemptBanner();
@@ -1304,7 +1509,7 @@ function render(){
     return;
   }
 
-  const hs=attemptMapped.filter(x=>tech||!x.h.technical);
+  const hs=attemptMapped.filter(x=>!x.h.quiet).filter(x=>tech||!x.h.technical);
   if(!hs.length){content.innerHTML='<div class=empty>No events yet — they appear here within ~2s of happening.</div>';return}
   if(view==='feed'||(view==='attention'&&!attemptEvents().some(e=>(e.event||e.action)==='record'))){
     const shown=view==='attention'
@@ -1326,9 +1531,11 @@ function render(){
     if(recVer!==_recGroupsVer||!_recGroupsCache)_recGroupsCache=recordGroups(recordEvents()),_recGroupsVer=recVer;
     const {groups,gorder}=_recGroupsCache;
     const html=renderRecordTable(groups,gorder,'');
-    if(html!==null)content.innerHTML=html;
-    decorateChat();
-    restoreTableScroll(tableScroll);
+    if(html!==null){
+      content.innerHTML=html;
+      decorateChat();
+      restoreTableScroll(tableScroll);
+    }
     return;
   }
   const progEvents=progressEvents();
@@ -1630,7 +1837,7 @@ async function poll(){
   setTimeout(poll,more?0:2000);
 }
 function pick(id,fromHash){
-  sel=id;selMeta=(window._runs||[]).find(r=>r.id===id)||null;offsets={};all=[];controls=[];
+  sel=id;selMeta=(window._runs||[]).find(r=>r.id===id)||null;offsets={};all=[];controls=[];flowNodeSelected=null;flowRowSelected=null;_flowVersion++;
   if(!fromHash)location.hash=encodeURIComponent(id);
   render();
 }

@@ -82,6 +82,18 @@ def api_json(port: int, path: str, payload: dict | None = None):
         return json.load(response)
 
 
+def wait_for_watch_status(state: Path, cwd: Path, terms: tuple[str, ...], timeout: float = 4) -> str:
+    deadline = time.time() + timeout
+    output = ""
+    while time.time() < deadline:
+        status = cli("watch", str(state), "--status", cwd=cwd)
+        output = status.stdout + status.stderr
+        if all(term in output for term in terms):
+            return output
+        time.sleep(0.05)
+    return output
+
+
 WORKER = """import runguard
 run = runguard.start_observed_run(
     'cli-smoke', source='cli-qa-source', dry_run=True,
@@ -211,6 +223,65 @@ with tempfile.TemporaryDirectory(prefix="observer-cli-") as tmp:
         ok("run returns child failure and retains its terminal event", failed_run.returncode == 7 and
            failure_events and failure_events[-1].get("event") == "run_failed",
            failed_run.stdout + failed_run.stderr)
+
+        watcher_cmd = [sys.executable, "-B", "-m", "observer_kit", "watch", str(state),
+                       "--follow", "--poll", "0.05"]
+        watch_a = subprocess.Popen(
+            [*watcher_cmd, "--run", "runguard:lease-a.jsonl"], cwd=project, env=CLI_ENV,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        watch_b = subprocess.Popen(
+            [*watcher_cmd, "--run", "runguard:lease-b.jsonl"], cwd=project, env=CLI_ENV,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            status = wait_for_watch_status(
+                state, project, ("runguard:lease-a.jsonl", "runguard:lease-b.jsonl"))
+            ok("different run IDs retain independent watcher ownership",
+               "runguard:lease-a.jsonl" in status and "runguard:lease-b.jsonl" in status,
+               status)
+
+            duplicate = cli("watch", str(state), "--run", "runguard:lease-a.jsonl",
+                            "--follow", "--poll", "0.05", cwd=project, timeout=5)
+            ok("a second watcher for the same run is refused",
+               duplicate.returncode == 3 and "WATCHER ALREADY ACTIVE" in duplicate.stderr,
+               duplicate.stdout + duplicate.stderr)
+
+            overlapping_all = cli("watch", str(state), "--all", "--follow", "--poll", "0.05",
+                                  cwd=project, timeout=5)
+            ok("an all-run watcher refuses overlapping run-scoped ownership",
+               overlapping_all.returncode == 3 and "WATCHER ALREADY ACTIVE" in overlapping_all.stderr,
+               overlapping_all.stdout + overlapping_all.stderr)
+        finally:
+            watch_a.terminate()
+            watch_b.terminate()
+            watch_a.wait(timeout=3)
+            watch_b.wait(timeout=3)
+        cleared = wait_for_watch_status(state, project, ("no active watchers",))
+        ok("watcher children exit when their CLI parent exits", "no active watchers" in cleared, cleared)
+
+        all_watcher = subprocess.Popen(
+            [*watcher_cmd, "--all"], cwd=project, env=CLI_ENV,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            all_status = wait_for_watch_status(state, project, ("all runs",))
+            ok("one all-run watcher owns a single-session project bridge",
+               "all runs" in all_status, all_status)
+
+            covered_run = cli("run", "--state-dir", str(state), "--", sys.executable, "-B", "-c",
+                              WORKER, cwd=project, timeout=10)
+            covered_output = covered_run.stdout + covered_run.stderr
+            ok("run reuses a covering watcher and exits with its worker",
+               covered_run.returncode == 0 and "reusing active all-run watcher" in covered_output and
+               "review bridge is still active" not in covered_output,
+               covered_output[-800:])
+        finally:
+            all_watcher.terminate()
+            all_watcher.wait(timeout=3)
+        final_status = wait_for_watch_status(state, project, ("no active watchers",))
+        ok("all-run watcher child exits with its CLI parent",
+           "no active watchers" in final_status, final_status)
     finally:
         dashboard.terminate()
         try:

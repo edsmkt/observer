@@ -108,7 +108,7 @@ ok('cold-start agents create new workflows or adapt unfamiliar scripts',
        'A cold-start agent owns the initial proposal, then asks concise questions',
        'an observed field catalog with paths/types/examples',
        'observed field catalog with paths/types/examples, projected columns',
-       'Emit every material outcome as a stable entity or phase row',
+       'Emit stable business rows as source items and classifications become known',
        'each slow phase emits a record before its terminal event')) and
    all(term in ' '.join(pattern.split()) for term in (
        'unfamiliar existing scripts after tracing their actual CLI and work paths',
@@ -167,11 +167,12 @@ ok('sample gate requires crash-resume proof beyond a green linter',
    'confirm the real sink during the sample' in pattern_words)
 ok('sample work and row-surface liveness are explicit contracts',
    'earliest query/page/batch' in wire_words and
-   'every slow discovery/read/transform/write loop' in wire_words and
-   'pair progress with rows' in wire_words and
+   'Emit stable business rows as source items and classifications become known' in wire_words and
+   'reserve phase rows for work that has no business key yet' in wire_words and
    'each slow phase emits a record before its terminal event' in prove_words and
    'sample limit bounds the earliest query, page, batch, or provider loop' in prove_words and
    'repeated progress loops have a stable record-row path' in pattern_words and
+   'Phase rows cover work before a business key exists and then yield to the business table' in pattern_words and
    'Sample work limit' in explain_words)
 ok('bounded source discovery drives a reviewable table projection',
    'declared API/schema contract and observed response shape from bounded read calls' in map_words and
@@ -193,12 +194,19 @@ ok('response discovery triangulates code, declared schemas, and live probes',
 ok('material outcomes have rows and scalar headline totals',
    'scalar headline metrics covering the material outcomes' in propose_words and
    'stratified dry-run sample across planned, write, skip, hold, missing, and failure outcomes' in propose_words and
-   'Emit every material outcome as a stable entity or phase row' in wire_words and
+   'Emit stable business rows as source items and classifications become known' in wire_words and
    'summary_metrics` whose keys advance through `run.count()`' in wire_words and
    'scalar headline counts reconcile with stratified write, skip, hold, missing, and failure rows' in prove_words and
    'Advance each selected key with `run.count()` during work' in pattern_words and
    'maps to a scalar numeric field on the terminal event' in pattern_words and
    'Outcome coverage' in explain_words)
+ok('canary visibility and watcher ownership are explicit contracts',
+   'a canary row visibly moves through selected, writing, verifying, and verified or failed' in prove_words and
+   'Watcher ownership refuses overlapping bridges' in skill_words and
+   'Different run IDs may own independent watchers' in pattern_words and
+   'Parent-owned watcher children exit with their CLI process' in pattern_words and
+   'through `selected`, `writing`, `verifying`, and `verified` or `failed`' in pattern_words and
+   'observer-kit watch .runguard --status' in pattern_words)
 ok('sample verification separates universal proof from active branches',
    'verify this universal minimum' in prove_words and
    'Verify every selected branch' in prove_words and

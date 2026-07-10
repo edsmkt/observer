@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run-scoped chat watcher — routes dashboard notes to the RIGHT agent session.
+"""Chat watcher that routes dashboard notes to the owning agent session.
 
 The dashboard writes every operator note into ONE shared `chat.jsonl`, each tagged
 with the `run` it's about. With several agent sessions open, an unscoped watcher would
@@ -26,14 +26,21 @@ watcher starts is not lost.
 Usage:
   python3 watch_chat.py <run_id> [--state-dir DIR] [--poll SEC]
                                  [--follow] [--timeout SEC] [--include-existing]
+  python3 watch_chat.py --all [--state-dir DIR] [--follow]
   python3 watch_chat.py <run_id> --reply "text" [--anchor ANCHOR] [--resolved]
                                  [--state-dir DIR]
 """
+import fcntl
+import hashlib
 import os
 import sys
 import json
 import time
 import argparse
+
+
+WATCH_PREFIX = '.observer-watcher-'
+REGISTRY_LOCK = '.observer-watchers.registry.lock'
 
 
 def _timestamp():
@@ -62,13 +69,118 @@ def _sig(m):
                       ensure_ascii=False, sort_keys=True)
 
 
-def _matches(m, run_id):
-    return (m.get('author') == 'user' or m.get('kind') == 'control') and m.get('run') == run_id
+def _matches(m, run_id, all_runs=False):
+    wakes = m.get('author') == 'user' or m.get('kind') == 'control'
+    return wakes and (all_runs or m.get('run') == run_id)
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _load_one(path):
+    try:
+        with open(path, encoding='utf-8') as handle:
+            return json.load(handle)
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _active_watchers(state_dir):
+    watchers = []
+    try:
+        names = os.listdir(state_dir)
+    except OSError:
+        return watchers
+    for name in names:
+        if not (name.startswith(WATCH_PREFIX) and name.endswith('.lock')):
+            continue
+        meta = _load_one(os.path.join(state_dir, name))
+        if meta.get('active') and _pid_alive(meta.get('pid')):
+            watchers.append(meta)
+    return watchers
+
+
+def _watch_key(run_id, all_runs):
+    return 'all' if all_runs else f'run:{run_id}'
+
+
+def _watch_path(state_dir, key):
+    digest = hashlib.sha256(key.encode('utf-8')).hexdigest()[:16]
+    return os.path.join(state_dir, f'{WATCH_PREFIX}{digest}.lock')
+
+
+def _write_meta(fd, meta):
+    payload = json.dumps(meta, ensure_ascii=False, sort_keys=True).encode('utf-8')
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.ftruncate(fd, 0)
+    os.write(fd, payload)
+    os.fsync(fd)
+
+
+def _conflicting_watcher(active, key):
+    for watcher in active:
+        other = watcher.get('key')
+        if key == 'all' or other == 'all' or other == key:
+            return watcher
+    return None
+
+
+def _acquire_watcher(state_dir, run_id, all_runs, parent_pid):
+    os.makedirs(state_dir, exist_ok=True)
+    key = _watch_key(run_id, all_runs)
+    registry_path = os.path.join(state_dir, REGISTRY_LOCK)
+    registry_fd = os.open(registry_path, os.O_RDWR | os.O_CREAT, 0o644)
+    fcntl.flock(registry_fd, fcntl.LOCK_EX)
+    try:
+        conflict = _conflicting_watcher(_active_watchers(state_dir), key)
+        if conflict:
+            label = 'all runs' if conflict.get('key') == 'all' else conflict.get('run')
+            print(f"WATCHER ALREADY ACTIVE: {label} (pid {conflict.get('pid')}). Reuse it.",
+                  file=sys.stderr)
+            return None
+
+        path = _watch_path(state_dir, key)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        meta = {
+            'active': True,
+            'key': key,
+            'mode': 'all' if all_runs else 'run',
+            'run': None if all_runs else run_id,
+            'pid': os.getpid(),
+            'parent_pid': parent_pid,
+            'started': _timestamp(),
+            'state_dir': os.path.abspath(state_dir),
+        }
+        _write_meta(fd, meta)
+        return fd, meta
+    finally:
+        fcntl.flock(registry_fd, fcntl.LOCK_UN)
+        os.close(registry_fd)
+
+
+def _release_watcher(lease):
+    if not lease:
+        return
+    fd, meta = lease
+    meta = dict(meta, active=False, stopped=_timestamp())
+    try:
+        _write_meta(fd, meta)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('run_id', help="only notes for THIS run wake the watcher (multi-session safe)")
+    ap.add_argument('run_id', nargs='?', help="only notes for THIS run wake the watcher")
+    ap.add_argument('--all', dest='all_runs', action='store_true',
+                    help="bridge every run for one long-lived project session")
     ap.add_argument('--state-dir', default=os.environ.get('RUNGUARD_STATE_DIR') or '.runguard')
     ap.add_argument('--poll', type=float, default=2.0)
     ap.add_argument('--follow', action='store_true', help="keep streaming instead of exiting on the first batch")
@@ -78,8 +190,18 @@ def main():
     ap.add_argument('--reply', help="post an agent reply to chat.jsonl and exit")
     ap.add_argument('--anchor', default='run', help="dashboard anchor/cell id (used with --reply)")
     ap.add_argument('--resolved', action='store_true', help="mark the reply as resolved (used with --reply)")
+    ap.add_argument('--parent-pid', type=int,
+                    help="exit when the owning observer-kit process exits")
     a = ap.parse_args()
 
+    if a.all_runs and a.run_id:
+        ap.error('choose a run_id or --all')
+    if not a.all_runs and not a.run_id:
+        ap.error('run_id is required unless --all is set')
+    if a.reply and a.all_runs:
+        ap.error('--reply requires a run_id')
+
+    a.state_dir = os.path.abspath(os.path.expanduser(a.state_dir))
     chat_path = os.path.join(a.state_dir, 'chat.jsonl')
 
     # Reply mode: write one agent reply and exit (no poll).
@@ -97,31 +219,40 @@ def main():
             f.write(json.dumps(rec, ensure_ascii=False, default=str) + '\n')
         return 0
 
+    lease = _acquire_watcher(a.state_dir, a.run_id, a.all_runs, a.parent_pid) if a.follow else None
+    if a.follow and lease is None:
+        return 3
+
     # Poll mode: watch for new user notes.
     seen = set()
     if not a.include_existing:                      # ignore notes left before we started
         for m in _load(chat_path):
-            if _matches(m, a.run_id):
+            if _matches(m, a.run_id, a.all_runs):
                 seen.add(_sig(m))
     deadline = (time.time() + a.timeout) if a.timeout else None
 
-    while True:
-        fresh = []
-        for m in _load(chat_path):
-            if _matches(m, a.run_id):
-                s = _sig(m)
-                if s not in seen:
-                    seen.add(s)
-                    fresh.append(m)
-        if fresh:
-            for m in fresh:
-                print(json.dumps(m, ensure_ascii=False))
-            sys.stdout.flush()
-            if not a.follow:
+    try:
+        while True:
+            if a.parent_pid and not _pid_alive(a.parent_pid):
                 return 0
-        if deadline and time.time() > deadline:
-            return 0
-        time.sleep(a.poll)
+            fresh = []
+            for m in _load(chat_path):
+                if _matches(m, a.run_id, a.all_runs):
+                    s = _sig(m)
+                    if s not in seen:
+                        seen.add(s)
+                        fresh.append(m)
+            if fresh:
+                for m in fresh:
+                    print(json.dumps(m, ensure_ascii=False))
+                sys.stdout.flush()
+                if not a.follow:
+                    return 0
+            if deadline and time.time() > deadline:
+                return 0
+            time.sleep(a.poll)
+    finally:
+        _release_watcher(lease)
 
 
 if __name__ == '__main__':

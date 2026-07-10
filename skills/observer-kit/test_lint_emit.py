@@ -395,5 +395,85 @@ ledger('backfill', 'run_finished', companies_to_write=12)
 ok("raw-ledger summary metrics pass",
    rc == 0, f"rc={rc}; {out[:240]}")
 
+# 25. Phase rows cannot stand in for business entities already discovered.
+rc, out, err = run_lint("""
+from runguard import ledger
+def phase_row(done):
+    ledger('scope', 'record', table='phase', key='discover', done=done)
+def discover():
+    companies = {}
+    for page in source_pages:
+        for row in fetch_page(page):
+            companies[row['id']] = row
+        ledger('scope', 'progress', phase='discover', done=len(companies))
+        phase_row(len(companies))
+    return companies
+def preview(companies):
+    for row in companies.values():
+        ledger('scope', 'record', table='companies', key=row['id'])
+""")
+ok("entity discovery with only phase rows is flagged",
+   rc == 1 and 'BUSINESS ROW LIVENESS MISSING' in out, f"rc={rc}; {out[:300]}")
+
+# 26. A dry-run limit must bound source work rather than only preview output.
+rc, out, err = run_lint("""
+import argparse
+from runguard import ledger
+ap = argparse.ArgumentParser()
+ap.add_argument('--dry-run', action='store_true')
+ap.add_argument('--limit', type=int)
+args = ap.parse_args()
+companies = fetch_all_companies()
+for row in companies[:args.limit]:
+    ledger('scope', 'record', table='companies', key=row['id'])
+""")
+ok("terminal-only sample limit is flagged",
+   rc == 1 and 'SAMPLE LIMIT LATE' in out, f"rc={rc}; {out[:300]}")
+
+rc, out, err = run_lint("""
+import argparse
+from runguard import ledger
+ap = argparse.ArgumentParser()
+ap.add_argument('--dry-run', action='store_true')
+ap.add_argument('--limit', type=int)
+args = ap.parse_args()
+for row in fetch_companies(limit=args.limit):
+    ledger('scope', 'record', table='companies', key=row['id'])
+""")
+ok("source-bounded sample limit passes", rc == 0, f"rc={rc}; {out[:260]}")
+
+# 27. A canary stays visible before, during, and after its mutation.
+rc, out, err = run_lint("""
+from runguard import ledger
+def canary(row):
+    patch_company(row['id'], {'country': 'Germany'})
+    verify_company(row['id'])
+    ledger('scope', 'record', table='companies', key=row['id'], status='verified')
+""")
+ok("canary mutation before its first row is flagged",
+   rc == 1 and 'CANARY VISIBILITY MISSING' in out, f"rc={rc}; {out[:300]}")
+
+rc, out, err = run_lint("""
+from runguard import ledger
+def canary(row):
+    ledger('scope', 'record', table='companies', key=row['id'], status='writing')
+    patch_company(row['id'], {'country': 'Germany'})
+    ledger('scope', 'record', table='companies', key=row['id'], status='verifying')
+    verify_company(row['id'])
+    ledger('scope', 'record', table='companies', key=row['id'], status='verified')
+""")
+ok("visible canary transition passes", rc == 0, f"rc={rc}; {out[:260]}")
+
+# 28. Free-form chat remains agent input; workers consume structured controls.
+rc, out, err = run_lint("""
+import runguard
+def run(run_id):
+    for message in runguard.read_chat(run_id=run_id, author='user'):
+        if 'stop' in message.get('text', '').lower():
+            break
+""")
+ok("worker chat used as control is flagged",
+   rc == 1 and 'CHAT CONTROL MISUSE' in out, f"rc={rc}; {out[:300]}")
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

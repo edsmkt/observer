@@ -1,8 +1,8 @@
-<h1 align="center">observer-kit</h1>
+<h1 align="center">Observer</h1>
 
-<p align="center"><strong>For when your agent does the data work, but you still need to see it.</strong></p>
+<p align="center"><strong>Visible execution and orchestration for agent-run data work.</strong></p>
 
-<p align="center">A local workflow harness for agent-run data transformation.</p>
+<p align="center"><strong>Observer Kit</strong> supervises each run. <strong>Observer Flow</strong> coordinates dependent steps.</p>
 
 <p align="center">
   <img alt="Python 3.9+" src="https://img.shields.io/badge/python-3.9%2B-3776AB?style=flat-square" />
@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="Observer Kit data view" src="assets/dashboard-live.png" width="960" />
+  <img alt="Observer Flow dependency graph" src="assets/dashboard-flow.png" width="960" />
 </p>
 
 Data transformation used to happen in familiar places: a database query, a
@@ -24,10 +24,14 @@ That is fast, but it is hard to review. You cannot see what landed, spot a bad
 row early, or tell the agent exactly what needs to change while the workflow is
 still running.
 
-Observer Kit turns an agent-run data transformation into a reviewable working
-session. It gives you a live local dashboard where you can see rows arrive,
-inspect what changed, message the agent about a specific record, and pause the
-run when something needs attention.
+This repository gives the agent two connected layers. **Observer Kit** turns an
+agent-run data transformation into a reviewable working session. **Observer
+Flow** lets the agent compose dependent transformations as a visible graph while
+Observer Kit continues to supervise the complete run.
+
+The local dashboard lets you see rows arrive, inspect what changed, follow each
+row through a multi-step flow, message the agent about a specific record, and
+pause the run when something needs attention.
 
 Use it for imports, database exports, enrichment, backfills, CRM updates,
 spreadsheet pushes, and any other job that changes or moves many records.
@@ -35,6 +39,8 @@ spreadsheet pushes, and any other job that changes or moves many records.
 It gives the collaboration loop a few simple pieces:
 
 - **A live table**: see the actual source rows and outcomes as work lands.
+- **A live flow**: inspect nodes, dependencies, batches, branches, and the path
+  taken by an individual row.
 - **A review conversation**: point the agent at a row or message it about the
   whole run.
 - **Run controls**: pause at a checkpoint, stop after the current record, and
@@ -45,20 +51,60 @@ It gives the collaboration loop a few simple pieces:
 ## How It Works
 
 ```text
-Agent adapts the real workflow
-            |
-            v
-Small sample runs first and fills the dashboard
-            |
-            v
-You inspect rows, message the agent, or pause the run
-            |
-            v
-The agent fixes, continues, or starts the approved full run
+Agent creates or adapts the real workflow
+                 |
+        +--------+---------+
+        |                  |
+   one script       dependent steps
+        |                  |
+        |           Observer Flow graph
+        |                  |
+        +--------+---------+
+                 |
+          Observer Kit harness
+                 |
+                 v
+   Live sample, review, controls, and approval
 ```
 
 The same run can continue after a fix. Existing rows update in place, so you
 see what changed instead of losing the earlier attempt.
+
+## Two Layers
+
+This repository includes two complementary agent skills and one shared local
+dashboard:
+
+- **[Observer Kit](skills/observer-kit/SKILL.md)** supervises execution with
+  live rows, source locks, durable resume, shared throttling, controls, review,
+  and explicit full-run approval.
+- **[Observer Flow](skills/observer-flow/SKILL.md)** designs multi-stage graphs
+  where later transformations depend on earlier results. Nodes may map, batch,
+  branch, expand, join, aggregate, or deliver records.
+
+Observer Flow treats a row as the entity the user follows, a field as visible
+data, and a node as one coherent operation that may produce several fields or
+child rows. One coordinator schedules the nodes and updates the same row as
+results land. Observer Kit remains the harness around the complete run.
+
+As the agent proves reusable nodes, subflows, and integrations, Observer Flow
+creates a project `flow-cookbook/`. That cookbook reflects the user's real APIs,
+fields, limits, and tests. When repeated mechanics share one meaningful contract
+and durable boundary, the agent logs each distinct occurrence, shows the user
+the evidence, and asks whether to promote them into a reusable code node or
+subflow.
+
+An Observer Flow coordinator runs through the same CLI and dashboard:
+
+```bash
+observer-kit run --state-dir .runguard -- \
+  python3 flow_coordinator.py --flow pipeline.flow.json --dry-run --limit 10
+```
+
+The [synthetic Flow demos](examples/observer-flow-demo/README.md) show
+conditional routing and a mixed workflow where individual homepage requests
+feed a discounted batch-labeling API while results still return to their stable
+business rows.
 
 ## Dashboard
 
@@ -71,13 +117,37 @@ LinkedIn, email, and sheet status; another workflow might show entirely
 different fields. Use **Filter columns** to combine text, category, and number
 filters while you inspect a large run.
 
+<p align="center">
+  <img alt="Observer data table with stable business rows" src="assets/dashboard-data.png" width="960" />
+</p>
+
+<p align="center"><em>The Data view keeps source rows stable while fields and outcomes change.</em></p>
+
+For an Observer Flow run, the **Flow** tab shows the live dependency graph,
+which node is running, row outcomes at each node, and the selected row's path.
+Click a node to inspect its script, inputs, outputs, condition, and rows. The
+Data table remains the business view and updates the same stable rows as fields
+land from successive nodes.
+
+<p align="center">
+  <img alt="Observer Flow batch node inspector" src="assets/dashboard-batch-details.png" width="960" />
+</p>
+
+<p align="center"><em>Select a node to inspect its contract, batch calls, and the rows that reached it.</em></p>
+
 During the first sample, the agent can include a `response_json` cell containing
 the decoded response body from the real source call. Click it to inspect the full
 JSON, then tell the agent which fields should become normal columns for the run.
 
 The **Timeline** is the plain-English history of the run. **Attention** focuses
-on records that need a look. **How it works** shows the workflow's `EXPLAIN.md`
-statement of intent.
+on records whose explicit `error` field needs a look. **How it works** shows the
+workflow's `EXPLAIN.md` statement of intent.
+
+<p align="center">
+  <img alt="Observer attention view showing records with explicit errors" src="assets/dashboard-attention.png" width="960" />
+</p>
+
+<p align="center"><em>Attention stays focused on declared failures instead of guessing from row text.</em></p>
 
 ### Talk To The Agent
 
@@ -106,20 +176,25 @@ process; the script pauses at a checkpoint where it has recorded its progress.
 
 ## Install
 
-Observer Kit has two separate pieces. The skill contains the playbook and
-standalone Python helpers. The CLI makes setup, launch, watching, and checks
-shorter and repeatable. During agent-led setup, the skill checks for the CLI,
-installs it in a writable Python environment when needed, and verifies it before
-initializing the project. The bundled helpers remain available for skill-only
-setups and environments where package installation is unavailable.
+The repository ships two agent skills and one CLI. The Observer Kit skill
+contains the execution playbook and standalone Python helpers. The Observer
+Flow skill contains the graph-design and coordination playbook. The CLI makes
+setup, launch, watching, and checks shorter and repeatable for both. During
+agent-led setup, the skills check for the CLI, install it in a writable Python
+environment when needed, and verify it before initializing the project. The
+bundled helpers remain available for skill-only setups and environments where
+package installation is unavailable.
 
-Install the skill for all local projects:
+The CLI keeps the established `observer-kit` command so existing projects and
+install instructions continue to work.
+
+Install the repository's skills for all local projects:
 
 ```bash
 npx skills add edsmkt/observer-kit -g
 ```
 
-Or add it only to the current project:
+Or add them only to the current project:
 
 ```bash
 npx skills add edsmkt/observer-kit
@@ -142,8 +217,8 @@ observer-kit --help
 
 ## Start A Project
 
-With the CLI, run these commands from the project containing your
-workflow script:
+With the CLI, run these commands from the project containing your workflow
+script or flow coordinator:
 
 ```bash
 observer-kit init .
@@ -175,8 +250,15 @@ observer-kit run --state-dir .runguard -- \
 ```
 
 `observer-kit run` attaches to an existing dashboard, starts the command, and
-connects the run watcher. It does not make decisions or approve a full run for
-you.
+creates or reuses one watcher for that run. Separate run IDs keep independent
+watchers. For one long-lived project session, an all-run watcher can cover the
+project and subsequent runs reuse it. Check ownership with:
+
+```bash
+observer-kit watch .runguard --status
+```
+
+The watcher remains transport; your agent makes decisions and requests full-run approval.
 
 ## A Simple Script
 
@@ -240,6 +322,10 @@ history in one run lane.
 For implementation patterns and event vocabulary, see
 [skills/observer-kit/references/pattern.md](skills/observer-kit/references/pattern.md).
 The agent skill is at [skills/observer-kit/SKILL.md](skills/observer-kit/SKILL.md).
+
+For dependency-driven workflows, see the
+[Observer Flow skill](skills/observer-flow/SKILL.md) and its
+[graph contract](skills/observer-flow/references/flow-contract.md).
 
 ## CLI Reference
 

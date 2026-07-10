@@ -44,8 +44,9 @@ else
   CTX+="  monitor_events({ taskId: \"<watcher_task>\" })  # read new notes${NL}"
   CTX+="To send a reply:${NL}"
   CTX+="  observer-kit reply <state_dir> --run <run_id> --anchor <anchor> --text \"<reply>\"${NL}"
-  CTX+="To start a new watcher for a run:${NL}"
-  CTX+="  monitor_command({ command: \"python3 watch_chat.py <run_id>\", notify: \"scheduled\" })${NL}"
+  CTX+="To inspect watcher ownership:${NL}"
+  CTX+="  observer-kit watch <state_dir> --status${NL}"
+  CTX+="New runs through observer-kit run create or reuse their watcher automatically.${NL}"
 fi
 
 jq -n --arg ctx "$CTX" '{

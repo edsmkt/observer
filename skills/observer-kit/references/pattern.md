@@ -413,10 +413,14 @@ For a dry-run sample, thread the sample limit into the earliest source query,
 page, batch, or provider loop. Stop discovery when the representative table rows
 reach that boundary, so sample time and source work stay proportionate.
 
-During every slow discovery, read, transform, or write phase, emit stable entity
-records as each entity becomes known. A phase that produces authoritative data
-only at completion updates one stable phase row while it runs. Progress events
+During every slow discovery, read, transform, or write phase, emit stable
+business records as each entity becomes known. Phase rows cover work before a
+business key exists and then yield to the business table. Progress events
 accompany these rows and provide counts or percentages.
+
+Make canaries visible before their mutation. Update one stable business row
+through `selected`, `writing`, `verifying`, and `verified` or `failed`; the
+operator can then observe the exact record throughout the read-back wait.
 
 For a sequential loop, persist and emit per item:
 
@@ -463,16 +467,24 @@ Call `run.check_controls()` before starting the next item and
 Each applied control emits `control_acknowledged`, so recovered processes retain
 one-shot control state.
 
-Use one long-lived dashboard and one all-run watcher for a project:
+Default to run-scoped ownership so separate agent sessions and run IDs remain
+independent:
 
 ```bash
 observer-kit dashboard .runguard
-observer-kit watch .runguard --all --follow
+observer-kit run --state-dir .runguard -- python3 workflow.py --dry-run --limit 10
 ```
 
-`observer-kit run` also detects `OBSERVER_RUN_STARTED` and starts a run-scoped
-watcher. The watcher emits `OBSERVER_CHAT_EVENT` lines to the active harness.
-The harness inspects evidence, edits scripts, resumes work, and replies:
+`observer-kit run` creates or reuses one watcher for that run. Different run IDs
+may own independent watchers. A single long-lived project session may choose
+`observer-kit watch .runguard --all --follow`; watcher ownership refuses overlap
+with run-scoped bridges. Parent-owned watcher children exit with their CLI
+process, and `observer-kit watch .runguard --status` lists current ownership.
+
+The watcher emits `OBSERVER_CHAT_EVENT` lines to the active harness. Let this
+bridge own monitoring and use its output or ledger events for completion rather
+than adding polling shells. The harness inspects evidence, edits scripts,
+resumes work, and replies:
 
 ```bash
 observer-kit reply .runguard \

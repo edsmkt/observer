@@ -1,0 +1,4 @@
+interface:
+  display_name: "Observer Flow"
+  short_description: "Build dependency-driven data workflows"
+  default_prompt: "Use $observer-flow to design this multi-stage data workflow as a reviewed dependency graph, and build the user's project cookbook from proven reusable nodes and integrations."

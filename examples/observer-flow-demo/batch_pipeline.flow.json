@@ -1,0 +1,89 @@
+{
+  "format_version": 1,
+  "graph": {
+    "id": "synthetic-homepage-batch-labeling",
+    "version": "1",
+    "label": "Homepage scraping + batch labeling",
+    "description": "Fetch each homepage individually, label ready texts in discounted batches, then prepare each labelled row independently."
+  },
+  "source": {
+    "identity": "batch_synthetic_data.py",
+    "snapshot": "demo-generated-batch-v1",
+    "table": "websites",
+    "key": "domain",
+    "fields": ["index", "company", "domain", "country", "source", "fixture_kind"]
+  },
+  "state": {
+    "store": ".runguard/synthetic-homepage-batch-labeling.flow.sqlite3"
+  },
+  "nodes": [
+    {
+      "id": "scrape_homepage",
+      "label": "Scrape homepage individually",
+      "version": "1",
+      "kind": "extract",
+      "mode": "map",
+      "script": "nodes/scrape_homepage.py",
+      "needs": [],
+      "inputs": ["index", "company", "domain", "fixture_kind"],
+      "outputs": ["scrape_status", "homepage_title", "homepage_text", "homepage_links", "homepage_response_json"],
+      "durable_unit": "row",
+      "concurrency": 1,
+      "max_attempts": 2,
+      "spend": {
+        "provider": "synthetic_html_fetch",
+        "units_per_call": 1,
+        "max_units": 24
+      }
+    },
+    {
+      "id": "batch_label_homepages",
+      "label": "Label homepages in batches",
+      "version": "1",
+      "kind": "batch",
+      "mode": "batch",
+      "script": "nodes/batch_label_homepages.py",
+      "needs": ["scrape_homepage"],
+      "inputs": ["domain", "homepage_title", "homepage_text"],
+      "outputs": ["label", "label_confidence", "label_reasoning", "label_status", "label_batch_id", "label_response_json"],
+      "batch": {
+        "max_items": 6,
+        "response_key": "domain",
+        "member_durable_unit": "row"
+      },
+      "durable_unit": "batch",
+      "concurrency": 1,
+      "max_attempts": 2,
+      "spend": {
+        "provider": "synthetic_batch_label_api",
+        "units_per_call": 2,
+        "max_units": 8
+      }
+    },
+    {
+      "id": "prepare_labelled_export",
+      "label": "Prepare labelled export",
+      "version": "1",
+      "kind": "sink",
+      "mode": "sink",
+      "script": "nodes/prepare_labelled_export.py",
+      "needs": ["batch_label_homepages"],
+      "inputs": ["index", "company", "domain", "label", "label_confidence"],
+      "outputs": ["export_status", "export_row", "export_destination"],
+      "durable_unit": "row",
+      "concurrency": 1,
+      "max_attempts": 1,
+      "side_effect": {
+        "type": "table_simulation",
+        "identity": "synthetic-labelled-websites",
+        "confirmation": "simulated_row_number"
+      }
+    }
+  ],
+  "limits": {
+    "sample_rows": 24,
+    "max_in_flight": 6,
+    "max_provider_calls": 28,
+    "max_writes": 24
+  }
+}

@@ -1,0 +1,159 @@
+{
+  "format_version": 1,
+  "graph": {
+    "id": "website-saas-qualification",
+    "version": "1"
+  },
+  "source": {
+    "identity": "input/websites.csv",
+    "snapshot": "sha256:sample-websites-snapshot",
+    "table": "websites",
+    "key": "website",
+    "fields": [
+      "website",
+      "company_name"
+    ]
+  },
+  "state": {
+    "store": ".runguard/website-saas-qualification.flow.sqlite3"
+  },
+  "nodes": [
+    {
+      "id": "inspect_website",
+      "version": "1",
+      "mode": "map",
+      "script": "nodes/inspect_website.py",
+      "needs": [],
+      "inputs": [
+        "website"
+      ],
+      "outputs": [
+        "website_title",
+        "description",
+        "social_links",
+        "inspect_response_json"
+      ],
+      "durable_unit": "row",
+      "concurrency": 4,
+      "max_attempts": 2,
+      "spend": {
+        "provider": "website_fetch",
+        "units_per_call": 1,
+        "max_units": 10
+      }
+    },
+    {
+      "id": "qualify_saas",
+      "version": "1",
+      "mode": "map",
+      "script": "nodes/qualify_saas.py",
+      "needs": [
+        "inspect_website"
+      ],
+      "inputs": [
+        "website",
+        "website_title",
+        "description"
+      ],
+      "outputs": [
+        "is_saas",
+        "saas_reasoning"
+      ],
+      "when": {
+        "all": [
+          {
+            "field": "description",
+            "op": "present"
+          }
+        ]
+      },
+      "durable_unit": "row",
+      "concurrency": 4,
+      "max_attempts": 2,
+      "spend": {
+        "provider": "classification_model",
+        "units_per_call": 1,
+        "max_units": 10
+      }
+    },
+    {
+      "id": "enrich_email",
+      "version": "1",
+      "mode": "map",
+      "script": "nodes/enrich_email.py",
+      "needs": [
+        "qualify_saas"
+      ],
+      "inputs": [
+        "website",
+        "is_saas"
+      ],
+      "outputs": [
+        "email",
+        "email_source",
+        "email_response_json"
+      ],
+      "when": {
+        "all": [
+          {
+            "field": "is_saas",
+            "op": "eq",
+            "value": true
+          }
+        ]
+      },
+      "durable_unit": "row",
+      "concurrency": 2,
+      "max_attempts": 3,
+      "spend": {
+        "provider": "email_enrichment",
+        "units_per_call": 1,
+        "max_units": 10
+      }
+    },
+    {
+      "id": "deliver_sheet",
+      "version": "1",
+      "mode": "sink",
+      "script": "nodes/deliver_sheet.py",
+      "needs": [
+        "enrich_email"
+      ],
+      "inputs": [
+        "website",
+        "company_name",
+        "is_saas",
+        "saas_reasoning",
+        "social_links",
+        "email"
+      ],
+      "outputs": [
+        "sheet_status",
+        "sheet_row_id"
+      ],
+      "when": {
+        "all": [
+          {
+            "field": "is_saas",
+            "op": "eq",
+            "value": true
+          }
+        ]
+      },
+      "durable_unit": "row",
+      "concurrency": 1,
+      "max_attempts": 2,
+      "side_effect": {
+        "type": "google_sheets",
+        "identity": "spreadsheet-id:qualified-websites",
+        "confirmation": "row_id"
+      }
+    }
+  ],
+  "limits": {
+    "sample_rows": 10,
+    "max_in_flight": 4,
+    "max_provider_calls": 30,
+    "max_writes": 10
+  }
+}

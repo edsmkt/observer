@@ -386,14 +386,12 @@ def ledger(scope: str, event: str, **fields) -> None:
     rec.update(fields)
     _append_jsonl(path, rec)
     if event == 'run_started':
-        # Marker a harness hook can match to remind the agent to start this run's
-        # watcher (so operator dashboard notes reach THIS session). Cheap + universal:
-        # any run that logs run_started emits it, whether or not start_run() is used.
+        # Marker used by the CLI and harness hooks to create or reuse one watcher.
         rid = f'runguard:{os.path.basename(path)}'
         sys.stderr.write(
             f"OBSERVER_RUN_STARTED {rid}\n"
-            f"[observer] start this run's chat watcher to receive operator notes:\n"
-            f"           python3 watch_chat.py {rid} --state-dir {_STATE_DIR}\n")
+            f"[observer] observer-kit run creates or reuses this run's chat watcher.\n"
+            f"           direct worker launches need one run-scoped bridge for {rid}.\n")
 
 
 def ledger_path(scope: str) -> str | None:

@@ -1,0 +1,157 @@
+{
+  "format_version": 1,
+  "graph": {
+    "id": "synthetic-account-routing",
+    "version": "1",
+    "label": "Synthetic account routing",
+    "description": "Inspect, qualify, route, enrich, and prepare reviewed rows for a simulated sheet."
+  },
+  "source": {
+    "identity": "synthetic_data.py",
+    "snapshot": "demo-generated-v1",
+    "table": "accounts",
+    "key": "domain",
+    "fields": [
+      "index",
+      "company",
+      "domain",
+      "country",
+      "source",
+      "profile"
+    ]
+  },
+  "state": {
+    "store": ".runguard/synthetic-account-routing.flow.sqlite3"
+  },
+  "nodes": [
+    {
+      "id": "inspect_profile",
+      "label": "Inspect profile",
+      "version": "1",
+      "kind": "extract",
+      "mode": "map",
+      "script": "nodes/inspect_profile.py",
+      "needs": [],
+      "inputs": ["company", "domain", "profile", "index"],
+      "outputs": ["site_title", "category_hint", "social_links", "profile_response_json"],
+      "durable_unit": "row",
+      "concurrency": 1,
+      "max_attempts": 2,
+      "spend": {
+        "provider": "synthetic_profile_api",
+        "units_per_call": 1,
+        "max_units": 40
+      }
+    },
+    {
+      "id": "qualify_account",
+      "label": "Qualify account",
+      "version": "1",
+      "kind": "decision",
+      "mode": "map",
+      "script": "nodes/qualify_account.py",
+      "needs": ["inspect_profile"],
+      "inputs": ["company", "domain", "category_hint"],
+      "outputs": ["qualification", "is_software", "confidence", "qualification_reason"],
+      "durable_unit": "row",
+      "concurrency": 1,
+      "max_attempts": 1
+    },
+    {
+      "id": "find_contact",
+      "label": "Find primary contact",
+      "version": "1",
+      "kind": "enrichment",
+      "mode": "map",
+      "script": "nodes/find_contact.py",
+      "needs": ["qualify_account"],
+      "inputs": ["index", "company", "domain", "qualification"],
+      "outputs": ["contact_name", "contact_email", "contact_source", "contact_confidence"],
+      "when": {
+        "all": [
+          {"field": "qualification", "op": "eq", "value": "qualified"}
+        ]
+      },
+      "edge_label": "qualified",
+      "durable_unit": "row",
+      "concurrency": 1,
+      "max_attempts": 2,
+      "spend": {
+        "provider": "synthetic_contact_api",
+        "units_per_call": 1,
+        "max_units": 25
+      }
+    },
+    {
+      "id": "queue_review",
+      "label": "Queue human review",
+      "version": "1",
+      "kind": "review",
+      "mode": "map",
+      "script": "nodes/queue_review.py",
+      "needs": ["qualify_account"],
+      "inputs": ["company", "domain", "qualification", "qualification_reason"],
+      "outputs": ["review_status", "review_reason"],
+      "when": {
+        "all": [
+          {"field": "qualification", "op": "eq", "value": "review"}
+        ]
+      },
+      "edge_label": "uncertain",
+      "durable_unit": "row",
+      "concurrency": 1,
+      "max_attempts": 1
+    },
+    {
+      "id": "mark_out_of_scope",
+      "label": "Mark out of scope",
+      "version": "1",
+      "kind": "route",
+      "mode": "map",
+      "script": "nodes/mark_out_of_scope.py",
+      "needs": ["qualify_account"],
+      "inputs": ["company", "domain", "qualification", "qualification_reason"],
+      "outputs": ["routing_status", "routing_reason"],
+      "when": {
+        "all": [
+          {"field": "qualification", "op": "eq", "value": "not_software"}
+        ]
+      },
+      "edge_label": "not software",
+      "durable_unit": "row",
+      "concurrency": 1,
+      "max_attempts": 1
+    },
+    {
+      "id": "prepare_sheet",
+      "label": "Prepare sheet row",
+      "version": "1",
+      "kind": "sink",
+      "mode": "sink",
+      "script": "nodes/prepare_sheet.py",
+      "needs": ["find_contact"],
+      "inputs": ["index", "company", "domain", "qualification", "contact_name", "contact_email"],
+      "outputs": ["sheet_status", "sheet_row", "destination_name"],
+      "when": {
+        "all": [
+          {"field": "qualification", "op": "eq", "value": "qualified"}
+        ]
+      },
+      "edge_label": "contact ready",
+      "durable_unit": "row",
+      "concurrency": 1,
+      "max_attempts": 1,
+      "side_effect": {
+        "type": "google_sheets_simulation",
+        "identity": "synthetic-review-sheet",
+        "confirmation": "simulated_row_number"
+      }
+    }
+  ],
+  "limits": {
+    "sample_rows": 30,
+    "max_in_flight": 1,
+    "max_provider_calls": 65,
+    "max_writes": 30
+  }
+}

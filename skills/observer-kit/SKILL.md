@@ -115,14 +115,13 @@ Apply the production contracts from `references/pattern.md`:
    version in the manifest.
 3. Use the first bounded read to call `run.schema_sample()` with the decoded real
    response body; let `--dry-run --limit` stop the earliest query/page/batch.
-4. Emit every material outcome as a stable entity or phase row from every slow
-   discovery/read/transform/write loop; update the same keys and pair progress with rows.
+4. Emit stable business rows as source items and classifications become known; reserve phase rows for work that has no business key yet, then update the same keys.
 5. Use the durable boundary order: perform work, persist the real result, emit
    the row, then checkpoint the completed key or chunk.
 6. Wrap each external delivery with validation, policy checks, write intent,
    confirmed sink call, and write receipt. Update the same business row's
    destination field from `pending` to its confirmed outcome.
-7. Check dashboard controls at loop boundaries and after completed writes.
+7. Consume structured dashboard controls at loop boundaries and after completed writes; dashboard chat remains input for the active agent session.
 8. Pace shared provider accounts with `throttle()` and enforce hard spend/write
    ceilings in code.
 
@@ -160,6 +159,7 @@ Exercise the real sample and verify this universal minimum:
 - the bounded schema sample opens as full JSON and its projected columns match user review;
 - scalar headline counts reconcile with stratified write, skip, hold, missing, and failure rows;
 - the sample limit bounds the earliest query, page, batch, or provider loop;
+- a canary row visibly moves through selected, writing, verifying, and verified or failed;
 - stable keys update existing rows and retain earlier fields;
 - a forced mid-sample failure resumes in the same lane from saved work;
 - a simultaneous start on the same source receives the duplicate-run warning;
@@ -196,14 +196,14 @@ branch has direct evidence, and the user has reviewed the sample dashboard.
 Ask for explicit confirmation after presenting the sample summary. Begin the
 full dataset through the intentional full-run flag after approval.
 
-Keep one dashboard server attached to the state directory. With the CLI, let
-`observer-kit run` attach to it and start the run-scoped watcher, or keep one
-all-run watcher for a long-lived project:
+Keep one dashboard server attached to the state directory. By default, `observer-kit run` creates or reuses one run-scoped watcher; different run IDs stay independent. Choose one all-run watcher for a single long-lived project session:
 
 ```bash
 observer-kit watch .runguard --all --follow
 observer-kit run --state-dir .runguard -- python3 workflow.py --full-run
 ```
+
+Watcher ownership refuses overlapping bridges and parent-owned watchers exit with their CLI process. Use `observer-kit watch .runguard --status` for inspection.
 
 Treat watcher output as transport into the current agent session. Inspect the
 script, JSONL, durable sink, and destination before replying or changing the

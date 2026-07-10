@@ -108,6 +108,12 @@ def cmd_test(args: argparse.Namespace) -> int:
         [sys.executable, str(skill_file("test_dashboard.py"))],
         [sys.executable, str(skill_file("test_cli.py"))],
     ]
+    flow_skill_dir = SKILL_DIR.parent / "observer-flow"
+    if flow_skill_dir.is_dir():
+        tests.extend([
+            [sys.executable, str(flow_skill_dir / "test_validate_flow.py"), str(flow_skill_dir)],
+            [sys.executable, str(flow_skill_dir / "test_skill.py"), str(flow_skill_dir)],
+        ])
     for cmd in tests:
         rc = subprocess.call(cmd)
         if rc:
@@ -117,6 +123,47 @@ def cmd_test(args: argparse.Namespace) -> int:
 
 def _chat_path(state_dir: Path) -> Path:
     return state_dir / "chat.jsonl"
+
+
+def _pid_alive(pid: object) -> bool:
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _active_watchers(state_dir: Path) -> list[dict]:
+    watchers = []
+    for path in state_dir.glob(".observer-watcher-*.lock"):
+        try:
+            meta = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            continue
+        if meta.get("active") and _pid_alive(meta.get("pid")):
+            watchers.append(meta)
+    return sorted(watchers, key=lambda item: str(item.get("started", "")))
+
+
+def _covering_watcher(state_dir: Path, run_id: str) -> dict | None:
+    run_key = f"run:{run_id}"
+    for watcher in _active_watchers(state_dir):
+        if watcher.get("key") in (run_key, "all"):
+            return watcher
+    return None
+
+
+def _print_watcher_status(state_dir: Path) -> int:
+    watchers = _active_watchers(state_dir)
+    if not watchers:
+        print(f"no active watchers for {state_dir}")
+        return 0
+    for watcher in watchers:
+        target = "all runs" if watcher.get("mode") == "all" else watcher.get("run")
+        parent = watcher.get("parent_pid") or "independent"
+        print(f"active pid={watcher.get('pid')} parent={parent} target={target} "
+              f"started={watcher.get('started')}")
+    return 0
 
 
 def _load_chat(path: Path) -> list[dict]:
@@ -173,46 +220,26 @@ def _stream_watcher_line(line: str) -> None:
 def cmd_watch(args: argparse.Namespace) -> int:
     state_dir = Path(args.state_dir).expanduser().resolve()
     state_dir.mkdir(parents=True, exist_ok=True)
-    if args.all:
-        chat_path = _chat_path(state_dir)
-        seen = set()
-        if not args.include_existing:
-            for message in _load_chat(chat_path):
-                if _wakes_watcher(message):
-                    seen.add(_chat_signature(message))
-        deadline = (time.time() + args.timeout) if args.timeout else None
-        try:
-            while True:
-                emitted = False
-                for message in _load_chat(chat_path):
-                    if not _wakes_watcher(message):
-                        continue
-                    signature = _chat_signature(message)
-                    if signature in seen:
-                        continue
-                    seen.add(signature)
-                    emitted = True
-                    _stream_watcher_line(json.dumps(message, ensure_ascii=False))
-                if deadline and time.time() > deadline:
-                    return 0
-                if not args.follow and emitted:
-                    return 0
-                time.sleep(args.poll)
-        except KeyboardInterrupt:
-            print()
-            return 130
+    if args.status:
+        return _print_watcher_status(state_dir)
 
     if not args.run:
-        raise SystemExit("--run is required unless --all is set")
+        if not args.all:
+            raise SystemExit("--run is required unless --all is set")
     cmd = [
         sys.executable,
         str(skill_file("watch_chat.py")),
-        args.run,
         "--state-dir",
         str(state_dir),
         "--poll",
         str(args.poll),
+        "--parent-pid",
+        str(os.getpid()),
     ]
+    if args.all:
+        cmd.append("--all")
+    else:
+        cmd.insert(2, args.run)
     if args.follow:
         cmd.append("--follow")
     if args.timeout:
@@ -287,6 +314,8 @@ def _start_watcher(state_dir: Path, run_id: str) -> subprocess.Popen:
             "--state-dir",
             str(state_dir),
             "--follow",
+            "--parent-pid",
+            str(os.getpid()),
             # The run marker and watcher process are separate processes. Include
             # a note that lands in that small startup window instead of losing it.
             "--include-existing",
@@ -318,6 +347,12 @@ def cmd_run(args: argparse.Namespace) -> int:
             return
         with lock:
             if watcher_proc is not None:
+                return
+            covering = _covering_watcher(state_dir, run_id)
+            if covering:
+                target = "all-run" if covering.get("mode") == "all" else "run-scoped"
+                print(f"[observer] reusing active {target} watcher pid {covering.get('pid')}",
+                      flush=True)
                 return
             watcher_proc = _start_watcher(state_dir, run_id)
             print(f"[observer] watcher connected for {run_id}", flush=True)
@@ -509,6 +544,10 @@ separate shells with observer-kit run --state-dir <same-dir> ...
 The watcher is transport only. It emits OBSERVER_CHAT_EVENT lines; the harness
 session remains responsible for inspecting data, editing scripts, rerunning,
 and replying.
+
+Long-lived followers register ownership in the state directory. The same run
+reuses one watcher, different run IDs remain independent, and --all is the
+single-session project-wide mode.
 """,
     )
     watch.add_argument("state_dir", nargs="?", default=".runguard", help="ledger/state directory")
@@ -519,6 +558,8 @@ and replying.
     watch.add_argument("--timeout", type=float, default=0, help="0 = wait forever")
     watch.add_argument("--include-existing", action="store_true",
                        help="emit existing user notes instead of only new notes")
+    watch.add_argument("--status", action="store_true",
+                       help="list active watcher ownership for this state directory")
     watch.set_defaults(func=cmd_watch)
 
     reply = sub.add_parser(

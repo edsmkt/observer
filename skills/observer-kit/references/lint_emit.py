@@ -10,6 +10,15 @@
     reporting progress from a repeated slow phase while its record/table
     surface stays empty until a terminal preview flush.
 
+    satisfying table liveness with synthetic phase rows while discovered
+    business entities remain invisible until completion.
+
+    applying a dry-run limit only to terminal preview rows instead of source
+    queries/pages, or mutating a canary before its business row is visible.
+
+    reading free-form dashboard chat as worker control instead of consuming the
+    structured, acknowledged control channel.
+
     starting an observed run with no explicit summary_metrics selection, which
     leaves useful terminal totals outside the intended headline surface.
 
@@ -47,6 +56,11 @@ DURABLE_WORDS = ('write', 'append', 'insert', 'upsert', 'persist', 'save',
                  'commit', 'receipt', 'checkpoint', 'dump', 'store', 'execute')
 READ_DERIVATION_CALLS = {'load', 'loads', 'get', 'items', 'values', 'keys',
                          'strip', 'split', 'decode', 'copy'}
+PHASE_TABLES = {'phase', 'phases', 'progress', 'status', 'run_status'}
+SOURCE_CALL_WORDS = ('build', 'fetch', 'read', 'search', 'query', 'scan', 'page',
+                     'request', 'urlopen', 'select', 'load', 'source', 'islice')
+MUTATION_CALL_WORDS = ('patch', 'write', 'insert', 'upsert', 'update', 'delete',
+                       'send', 'post', 'put')
 
 
 def _is_ledger_event_call(node, event):
@@ -99,6 +113,153 @@ def _summary_metric_violations(tree):
     return violations
 
 
+def _contains_limit(node, names):
+    return any(
+        (isinstance(item, ast.Attribute) and item.attr == 'limit')
+        or (isinstance(item, ast.Name) and item.id in names)
+        for item in ast.walk(node)
+    )
+
+
+def _sample_limit_violations(tree):
+    declarations = []
+    has_dry_run = False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or _called_name(node) != 'add_argument':
+            continue
+        values = [arg.value for arg in node.args if isinstance(arg, ast.Constant)]
+        declarations.extend(node for value in values if value == '--limit')
+        has_dry_run = has_dry_run or '--dry-run' in values
+    if not declarations or not has_dry_run:
+        return []
+
+    names = set()
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
+                continue
+            if not _contains_limit(node.value, names):
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            before = len(names)
+            for target in targets:
+                names.update(_target_names(target))
+            changed = changed or len(names) != before
+
+    for call in [node for node in ast.walk(tree) if isinstance(node, ast.Call)]:
+        name = (_called_name(call) or '').lower()
+        values = list(call.args) + [keyword.value for keyword in call.keywords]
+        if (any(word in name for word in SOURCE_CALL_WORDS)
+                and any(_contains_limit(value, names) for value in values)):
+            return []
+        if name in ('range', 'islice') and any(_contains_limit(value, names) for value in values):
+            return []
+
+    for node in ast.walk(tree):
+        test = node.test if isinstance(node, (ast.If, ast.While)) else None
+        if test is None or not _contains_limit(test, names):
+            continue
+        if any(isinstance(call, ast.Call)
+               and any(word in ((_called_name(call) or '').lower()) for word in SOURCE_CALL_WORDS)
+               for call in ast.walk(node)):
+            return []
+    return [('SAMPLE_LIMIT_LATE', declarations[0].lineno)]
+
+
+def _record_table_kind(call):
+    if not _is_ledger_record_call(call):
+        return None
+    for keyword in call.keywords:
+        if keyword.arg == 'table':
+            if isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
+                return 'phase' if keyword.value.value.lower() in PHASE_TABLES else 'business'
+            return 'business'
+    return 'business'
+
+
+def _function_record_kinds(fn, functions, seen=None):
+    seen = set(seen or ())
+    if fn.name in seen:
+        return set()
+    seen.add(fn.name)
+    kinds = set()
+    for node in _body_nodes(fn):
+        if not isinstance(node, ast.Call):
+            continue
+        kind = _record_table_kind(node)
+        if kind:
+            kinds.add(kind)
+        helper = functions.get(_called_name(node))
+        if helper:
+            kinds.update(_function_record_kinds(helper, functions, seen))
+    return kinds
+
+
+def _loop_record_kinds(loop, functions):
+    kinds = set()
+    for node in _body_nodes(loop):
+        if not isinstance(node, ast.Call):
+            continue
+        kind = _record_table_kind(node)
+        if kind:
+            kinds.add(kind)
+        helper = functions.get(_called_name(node))
+        if helper:
+            kinds.update(_function_record_kinds(helper, functions))
+    return kinds
+
+
+def _loop_produces_entities(loop):
+    counter_names = {'progress', 'metrics', 'counts', 'counters', 'stats'}
+    for node in _body_nodes(loop):
+        if isinstance(node, (ast.Yield, ast.YieldFrom)):
+            return True
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(isinstance(target, ast.Subscript) for target in targets):
+                return True
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in COLLECTION_MUTATIONS):
+            roots = _root_names(node.func.value)
+            if roots and not roots <= counter_names:
+                return True
+    return False
+
+
+def _canary_visibility_violations(tree):
+    violations = []
+    for fn in [node for node in ast.walk(tree)
+               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+               and 'canary' in node.name.lower()]:
+        calls = sorted((node for node in ast.walk(fn) if isinstance(node, ast.Call)),
+                       key=lambda node: (node.lineno, node.col_offset))
+        mutations = [call for call in calls
+                     if any((_called_name(call) or '').lower().startswith(word)
+                            for word in MUTATION_CALL_WORDS)
+                     and (_called_name(call) or '').lower() not in ('write_meta',)]
+        if not mutations:
+            continue
+        first_mutation = mutations[0]
+        records = [call for call in calls if _is_ledger_record_call(call)]
+        step_before = any(isinstance(call.func, ast.Attribute) and call.func.attr == 'step'
+                          and call.lineno <= first_mutation.lineno for call in calls)
+        before = any(call.lineno < first_mutation.lineno for call in records)
+        after = any(call.lineno > first_mutation.lineno for call in records)
+        if not step_before and not (before and after):
+            violations.append(('CANARY_VISIBILITY_MISSING', first_mutation.lineno))
+    return violations
+
+
+def _chat_control_violations(tree):
+    return [
+        ('CHAT_CONTROL_MISUSE', node.lineno)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _called_name(node) == 'read_chat'
+    ]
+
+
 def _loop_ranges_over_work(node, work_names):
     """Heuristic: is this for/while looping over something that looks like the
     work set (todo / items / companies / results.values() / futures)?"""
@@ -142,6 +303,11 @@ def analyze(path):
     # advance at least one stable entity or phase row in that same loop path.
     row_liveness_violations = _find_row_liveness_violations(tree)
     summary_violations = _summary_metric_violations(tree)
+    limit_violations = _sample_limit_violations(tree)
+    canary_violations = _canary_visibility_violations(tree)
+    chat_control_violations = _chat_control_violations(tree)
+    contract_violations = (row_liveness_violations + summary_violations +
+                           limit_violations + canary_violations + chat_control_violations)
 
     # A result held only in memory after a provider phase is neither resumable
     # nor durable, even if the script emits lively progress heartbeats. Require
@@ -153,19 +319,21 @@ def analyze(path):
     ]
 
     if not record_emit_sites:
-        return durability_violations + row_liveness_violations + summary_violations
+        return durability_violations + contract_violations
 
     # A record emit is VALID only if it is inside a work loop (the same loop that
     # mutates results), or inside a function called from a work loop.
     violations = []
     for fname, node in record_emit_sites:
+        if 'canary' in fname.lower():
+            continue
         # Buffer durability is checked per result-producing loop above. Record
         # placement is local: any repeated item loop (or helper it calls) streams.
         if _emit_in_any_work_loop(node, tree, work_names):
             continue
         violations.append((fname, node.lineno))
 
-    return violations + durability_violations + row_liveness_violations + summary_violations
+    return violations + durability_violations + contract_violations
 
 
 def _enclosing_function(tree, node):
@@ -253,13 +421,16 @@ def _loop_emits_event(loop, event, functions):
 
 def _find_row_liveness_violations(tree):
     functions = _function_defs(tree)
-    return [
-        ('ROW_LIVENESS_MISSING', loop.lineno)
-        for loop in ast.walk(tree)
-        if isinstance(loop, LOOP_TYPES)
-        and _loop_emits_event(loop, 'progress', functions)
-        and not _loop_emits_event(loop, 'record', functions)
-    ]
+    violations = []
+    for loop in ast.walk(tree):
+        if not isinstance(loop, LOOP_TYPES) or not _loop_emits_event(loop, 'progress', functions):
+            continue
+        kinds = _loop_record_kinds(loop, functions)
+        if not kinds:
+            violations.append(('ROW_LIVENESS_MISSING', loop.lineno))
+        elif kinds == {'phase'} and _loop_produces_entities(loop):
+            violations.append(('BUSINESS_ROW_LIVENESS_MISSING', loop.lineno))
+    return violations
 
 
 def _root_names(node):
@@ -674,12 +845,28 @@ def main():
         print('  ROW LIVENESS MISSING: a repeated loop emits progress while its')
         print('  record/table surface stays unchanged. A terminal preview dump leaves')
         print('  the operator with an empty table during the slow phase.')
+    if any(kind == 'BUSINESS_ROW_LIVENESS_MISSING' for kind, _ in violations):
+        print('  BUSINESS ROW LIVENESS MISSING: a repeated loop discovers or')
+        print('  accumulates entities, but only a synthetic phase row advances.')
+        print('  The operator cannot inspect representative business data live.')
+    if any(kind == 'SAMPLE_LIMIT_LATE' for kind, _ in violations):
+        print('  SAMPLE LIMIT LATE: --limit has no apparent path into a source')
+        print('  query, page, batch, iterator, or source-loop stop condition.')
+    if any(kind == 'CANARY_VISIBILITY_MISSING' for kind, _ in violations):
+        print('  CANARY VISIBILITY MISSING: a canary mutates before a business')
+        print('  row becomes visible and does not show the full verification transition.')
+    if any(kind == 'CHAT_CONTROL_MISUSE' for kind, _ in violations):
+        print('  CHAT CONTROL MISUSE: the worker reads free-form dashboard chat.')
+        print('  Worker control belongs on the structured controls channel.')
     if any(kind == 'SUMMARY_METRICS_MISSING' for kind, _ in violations):
         print('  SUMMARY METRICS MISSING: the run start has no explicit headline')
         print('  metric selection, so useful terminal totals can remain outside the')
         print('  dashboard summary strip.')
-    if any(kind not in ('DURABILITY_MISSING', 'ROW_LIVENESS_MISSING',
-                        'SUMMARY_METRICS_MISSING')
+    named_contracts = ('DURABILITY_MISSING', 'ROW_LIVENESS_MISSING',
+                       'BUSINESS_ROW_LIVENESS_MISSING', 'SUMMARY_METRICS_MISSING',
+                       'SAMPLE_LIMIT_LATE', 'CANARY_VISIBILITY_MISSING',
+                       'CHAT_CONTROL_MISUSE')
+    if any(kind not in named_contracts
            for kind, _ in violations):
         print('  RECORD EMIT MISSING: record ledger events are outside the work loop.')
     print()
@@ -689,19 +876,38 @@ def main():
     if any(kind == 'ROW_LIVENESS_MISSING' for kind, _ in violations):
         print('  Liveness fix: emit a stable entity or phase record from each progress')
         print('  loop, then update that same table/key as later fields become known.')
+    if any(kind == 'BUSINESS_ROW_LIVENESS_MISSING' for kind, _ in violations):
+        print('  Business-row fix: emit representative entity rows as discovery or')
+        print('  classification lands; reserve phase rows for phases with no entity yet.')
+    if any(kind == 'SAMPLE_LIMIT_LATE' for kind, _ in violations):
+        print('  Sample fix: thread --limit into the earliest source query/page/batch')
+        print('  and stop discovery when the representative sample reaches its budget.')
+    if any(kind == 'CANARY_VISIBILITY_MISSING' for kind, _ in violations):
+        print('  Canary fix: update one stable business row through selected, writing,')
+        print('  verifying, and verified or failed states around the mutation.')
+    if any(kind == 'CHAT_CONTROL_MISUSE' for kind, _ in violations):
+        print('  Control fix: use run.check_controls() at durable boundaries and leave')
+        print('  chat messages for the active agent session.')
     if any(kind == 'SUMMARY_METRICS_MISSING' for kind, _ in violations):
         print('  Summary fix: select three to five summary_metrics at run start and')
         print('  emit matching scalar numeric fields on the terminal event.')
-    if any(kind not in ('DURABILITY_MISSING', 'ROW_LIVENESS_MISSING',
-                        'SUMMARY_METRICS_MISSING')
+    if any(kind not in named_contracts
            for kind, _ in violations):
         print('  Record fix: emit each record from its item loop or completion callback.')
     print()
     for fname, lineno in violations:
         if fname == 'ROW_LIVENESS_MISSING':
             print(f'  - progress loop at line {lineno} has no record-row path')
+        elif fname == 'BUSINESS_ROW_LIVENESS_MISSING':
+            print(f'  - entity-producing progress loop at line {lineno} emits only phase rows')
         elif fname == 'SUMMARY_METRICS_MISSING':
             print(f'  - run start at line {lineno} has no summary_metrics selection')
+        elif fname == 'SAMPLE_LIMIT_LATE':
+            print(f'  - --limit declared at line {lineno} does not bound apparent source work')
+        elif fname == 'CANARY_VISIBILITY_MISSING':
+            print(f'  - canary mutation at line {lineno} lacks a visible row transition')
+        elif fname == 'CHAT_CONTROL_MISUSE':
+            print(f'  - free-form chat is read as worker input at line {lineno}')
         elif fname != 'DURABILITY_MISSING' and isinstance(lineno, int):
             print(f'  - record emit in {fname}() at line {lineno} is outside any work loop')
     print()
