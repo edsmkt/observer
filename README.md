@@ -240,8 +240,9 @@ an `EXPLAIN.md` template. Keep the dashboard running while the agent works.
 With a skill-only installation, ask the agent to use Observer Kit's
 bundled-script path. It copies `runguard.py` and `watch_chat.py` beside the
 workflow, creates `.runguard`, copies the `EXPLAIN.md` template, and launches
-`run_dashboard.py` directly. The resulting locks, ledgers, controls, chat, and
-dashboard are the same as the CLI path.
+`run_dashboard.py` directly with its adjacent `assets/dashboard.js` file. The
+resulting locks, ledgers, controls, chat, and dashboard are the same as the CLI
+path.
 
 Then ask your agent to wire Observer Kit into the real script. With the CLI, a
 typical first run is:

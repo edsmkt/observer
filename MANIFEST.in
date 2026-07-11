@@ -1,0 +1,6 @@
+include LICENSE
+include README.md
+recursive-include examples/observer-flow-demo *
+recursive-include skills *
+recursive-exclude examples/observer-flow-demo __pycache__ *.py[cod] .DS_Store
+recursive-exclude skills __pycache__ *.py[cod] .DS_Store

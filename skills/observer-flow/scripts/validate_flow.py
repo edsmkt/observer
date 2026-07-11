@@ -6,7 +6,7 @@ import argparse
 import hashlib
 import json
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 
@@ -17,6 +17,7 @@ CONDITION_GROUPS = {"all", "any"}
 CONDITION_OPS = {
     "eq", "ne", "present", "empty", "contains", "gt", "gte", "lt", "lte", "in"
 }
+RECIPE_STATUSES = {"candidate", "proven", "superseded"}
 
 
 def _is_text(value: Any) -> bool:
@@ -29,6 +30,25 @@ def _is_string_list(value: Any) -> bool:
 
 def _positive_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _node_script_error(value: Any) -> str:
+    if not _is_text(value):
+        return "must be a non-empty string"
+    if "\\" in value or ":" in value:
+        return "must use a relative POSIX path under nodes/"
+    path = PurePosixPath(value)
+    if (
+        path.is_absolute()
+        or len(path.parts) < 2
+        or path.parts[0] != "nodes"
+        or any(part in {"", ".", ".."} for part in path.parts)
+        or str(path) != value
+    ):
+        return "must stay under nodes/ without absolute or parent segments"
+    if path.suffix != ".py":
+        return "must name a Python file under nodes/"
+    return ""
 
 
 def _condition_fields(condition: Any, path: str, errors: list[str]) -> set[str]:
@@ -63,6 +83,8 @@ def _condition_fields(condition: Any, path: str, errors: list[str]) -> set[str]:
         errors.append(f"{path} has unsupported keys: {', '.join(extra)}")
     if op in {"eq", "ne", "contains", "gt", "gte", "lt", "lte", "in"} and "value" not in condition:
         errors.append(f"{path}.value is required for op={op}")
+    if op == "in" and "value" in condition and not isinstance(condition["value"], list):
+        errors.append(f"{path}.value must be a list for op=in")
     return {field} if _is_text(field) else set()
 
 
@@ -148,8 +170,26 @@ def validate_manifest(document: Any) -> list[str]:
             errors.append(f"{path}.version must be a non-empty string")
         if raw_node.get("mode") not in MODES:
             errors.append(f"{path}.mode must be one of {sorted(MODES)}")
-        if not _is_text(raw_node.get("script")):
-            errors.append(f"{path}.script must be a non-empty string")
+        script_error = _node_script_error(raw_node.get("script"))
+        if script_error:
+            errors.append(f"{path}.script {script_error}")
+
+        recipe = raw_node.get("recipe")
+        if recipe is not None:
+            if not isinstance(recipe, dict):
+                errors.append(f"{path}.recipe must be an object")
+            else:
+                if not _is_text(recipe.get("id")) or not ID_RE.match(str(recipe.get("id", ""))):
+                    errors.append(f"{path}.recipe.id must use lowercase letters, digits, hyphens, or underscores")
+                if not _is_text(recipe.get("version")):
+                    errors.append(f"{path}.recipe.version must be a non-empty string")
+                if recipe.get("status") not in RECIPE_STATUSES:
+                    errors.append(f"{path}.recipe.status must be one of {sorted(RECIPE_STATUSES)}")
+                extra_recipe = sorted(set(recipe) - {"id", "version", "status"})
+                if extra_recipe:
+                    errors.append(
+                        f"{path}.recipe has unsupported keys: {', '.join(extra_recipe)}"
+                    )
 
         for list_field in ("needs", "inputs", "outputs"):
             value = raw_node.get(list_field)

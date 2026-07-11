@@ -17,9 +17,9 @@ that behavior repeatable, not define a separate workflow.
 | --- | --- | --- | --- |
 | Global skills | `npx skills add edsmkt/observer-kit -g` | You want Observer available to agents in every local project. | Installs the Observer Kit and Observer Flow playbooks. The agent still probes for the CLI before setup. |
 | Project skills | `npx skills add edsmkt/observer-kit` | You want Observer available only in the current project. | Same playbooks, scoped to the project. Useful for teams that vendor skills with a repo. |
-| CLI from GitHub | `python3 -m pip install git+https://github.com/edsmkt/observer-kit.git` | You want the normal `observer-kit` command without cloning this repo. | Provides `observer-kit init`, `dashboard`, `run`, `watch`, `reply`, `doctor`, and `test`. |
+| CLI from GitHub | `python3 -m pip install git+https://github.com/edsmkt/observer-kit.git` | You want the normal `observer-kit` command without cloning this repo. | Provides `observer-kit init`, `dashboard`, `run`, `watch`, `reply`, `doctor`, and `test`. Wheels keep their helper bundle inside the `observer_kit` package, including user and custom-target installs. |
 | Editable checkout | `python3 -m pip install -e .` | You are developing Observer itself or testing local changes. | Provides the same CLI from this checkout. `python3 -m observer_kit --help` should also work. |
-| Skill-only bundled helpers | Agent copies `runguard.py`, `watch_chat.py`, `run_dashboard.py`, and `EXPLAIN.md` from the installed skill. | Package installation is unavailable or the user chooses a vendored setup. | Produces the same local ledger, controls, dashboard, and watcher semantics as the CLI path. |
+| Skill-only bundled helpers | Agent copies `runguard.py`, `watch_chat.py`, `run_dashboard.py`, `assets/dashboard.js`, and `EXPLAIN.md` from the installed skill. | Package installation is unavailable or the user chooses a vendored setup. | Produces the same local ledger, controls, dashboard, and watcher semantics as the CLI path. Keep the asset beside the script at `assets/dashboard.js`. |
 
 ## Compatibility Contract
 
@@ -54,6 +54,21 @@ The canonical execution contract lives in:
 The README is the product overview and quick start. This matrix documents the
 supported distribution paths. Runtime code should stay small and defer
 operator-facing decisions to the playbooks.
+
+## Maintainer Browser Verification
+
+Dashboard changes have a real-browser acceptance path while the shipped runtime
+remains dependency-free:
+
+```bash
+python3 -m pip install -e ".[browser-test]"
+python3 -m playwright install chromium
+OBSERVER_REQUIRE_BROWSER_TEST=1 python3 -B -m observer_kit test
+```
+
+Without the environment flag, `observer-kit test` reports a clear skip when
+Playwright or Chromium is unavailable. CI sets the flag so browser execution is
+required for every pushed change and pull request.
 
 ## Ledger Size And Long Runs
 

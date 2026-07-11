@@ -16,6 +16,7 @@ from urllib.request import Request, urlopen
 
 
 passed = failed = 0
+SKILL_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CLI_ENV = os.environ.copy()
 SOURCE_PACKAGE = REPO_ROOT / "observer_kit" / "__init__.py"
@@ -127,9 +128,9 @@ with tempfile.TemporaryDirectory(prefix="observer-cli-") as tmp:
     ok("init creates a private state dir", (state / "EXPLAIN.md").is_file() and
        (state / ".gitignore").read_text(encoding="utf-8") == "*.lock\n*.throttle\n*.jsonl\n")
     ok("CLI init vendors byte-identical bundled helpers",
-       (project / "runguard.py").read_bytes() == (REPO_ROOT / "skills" / "observer-kit" / "runguard.py").read_bytes() and
-       (project / "watch_chat.py").read_bytes() == (REPO_ROOT / "skills" / "observer-kit" / "watch_chat.py").read_bytes() and
-       (state / "EXPLAIN.md").read_bytes() == (REPO_ROOT / "skills" / "observer-kit" / "EXPLAIN.md").read_bytes())
+       (project / "runguard.py").read_bytes() == (SKILL_ROOT / "runguard.py").read_bytes() and
+       (project / "watch_chat.py").read_bytes() == (SKILL_ROOT / "watch_chat.py").read_bytes() and
+       (state / "EXPLAIN.md").read_bytes() == (SKILL_ROOT / "EXPLAIN.md").read_bytes())
 
     doctor = cli("doctor", str(project), cwd=project)
     ok("doctor accepts a fresh project", doctor.returncode == 0, doctor.stdout + doctor.stderr)
@@ -141,6 +142,12 @@ with tempfile.TemporaryDirectory(prefix="observer-cli-") as tmp:
     )
     try:
         ok("long-lived dashboard starts", wait_for_dashboard(port))
+        with urlopen(f"http://127.0.0.1:{port}/assets/dashboard.js", timeout=3) as response:
+            dashboard_js = response.read()
+            dashboard_js_type = response.headers.get_content_type()
+        expected_dashboard_js = (SKILL_ROOT / "assets" / "dashboard.js").read_bytes()
+        ok("CLI dashboard serves the bundled JavaScript asset byte-for-byte",
+           dashboard_js_type == "application/javascript" and dashboard_js == expected_dashboard_js)
 
         run = cli(
             "run", "--state-dir", str(state), "--dashboard", "--port", str(port),

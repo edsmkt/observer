@@ -108,6 +108,63 @@ ok("condition operator is validated",
    any("must be one of" in error and ".op" in error for error in condition_errors),
    str(condition_errors))
 
+operator_values = {
+    "eq": "x", "ne": "x", "present": None, "empty": None,
+    "contains": "x", "gt": 1, "gte": 1, "lt": 1, "lte": 1,
+    "in": ["x", "y"],
+}
+operator_errors = {}
+for operator, value in operator_values.items():
+    candidate = copy.deepcopy(base)
+    predicate = {"field": "description", "op": operator}
+    if operator not in {"present", "empty"}:
+        predicate["value"] = value
+    candidate["nodes"][1]["when"] = {"all": [predicate]}
+    operator_errors[operator] = module.validate_manifest(candidate)
+ok("validator and runtime condition vocabulary stays complete",
+   set(operator_values) == module.CONDITION_OPS and
+   all(not errors for errors in operator_errors.values()), str(operator_errors))
+
+bad_in = copy.deepcopy(base)
+bad_in["nodes"][1]["when"] = {
+    "all": [{"field": "description", "op": "in", "value": "not-a-list"}]
+}
+bad_in_errors = module.validate_manifest(bad_in)
+ok("in conditions require an explicit choice list",
+   any("must be a list for op=in" in error for error in bad_in_errors),
+   str(bad_in_errors))
+
+unsafe_scripts = (
+    "../outside.py", "nodes/../../outside.py", "/etc/passwd", "C:\\Windows\\win.ini",
+)
+unsafe_results = {}
+for script in unsafe_scripts:
+    candidate = copy.deepcopy(base)
+    candidate["nodes"][0]["script"] = script
+    unsafe_results[script] = module.validate_manifest(candidate)
+ok("node scripts stay in the manifest's nodes namespace",
+   all(any(".script" in error and "nodes/" in error for error in errors)
+       for errors in unsafe_results.values()), str(unsafe_results))
+
+nested_script = copy.deepcopy(base)
+nested_script["nodes"][0]["script"] = "nodes/inspection/inspect_website.py"
+ok("normalized nested node paths remain valid",
+   module.validate_manifest(nested_script) == [],
+   str(module.validate_manifest(nested_script)))
+
+recipe_bound = copy.deepcopy(base)
+recipe_bound["nodes"][0]["recipe"] = {
+    "id": "inspect-website", "version": "2", "status": "proven"
+}
+ok("recipe identity includes ID, version, and lifecycle status",
+   module.validate_manifest(recipe_bound) == [], str(module.validate_manifest(recipe_bound)))
+
+bad_recipe = copy.deepcopy(recipe_bound)
+bad_recipe["nodes"][0]["recipe"].pop("status")
+bad_recipe_errors = module.validate_manifest(bad_recipe)
+ok("incomplete recipe identity is rejected",
+   any("recipe.status" in error for error in bad_recipe_errors), str(bad_recipe_errors))
+
 condition_without_edge = copy.deepcopy(base)
 condition_without_edge["nodes"][1]["when"] = {
     "all": [{"field": "email", "op": "present"}]

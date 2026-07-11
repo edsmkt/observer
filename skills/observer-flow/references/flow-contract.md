@@ -173,6 +173,9 @@ Each node declares:
 - `version` changes when code, prompt, model, parsing, or semantics change.
 - `mode` selects the execution shape.
 - `script` or a project-specific callable identity resolves the implementation.
+  The bundled JSON validator uses normalized relative Python paths under
+  `nodes/`; the executor resolves and contains that path again before reading or
+  importing it.
 - `needs` lists prerequisite node IDs.
 - `inputs` lists committed source or ancestor fields.
 - `outputs` lists fields owned by this node version.
@@ -183,6 +186,8 @@ Each node declares:
 - `concurrency` and `max_attempts` state local execution ceilings.
 - `spend` may declare provider, units per call, and a hard unit ceiling.
 - `side_effect` declares a destination and confirmation contract for a sink.
+- `recipe`, when present, records the cookbook recipe `id`, `version`, and
+  lifecycle `status`; all three participate in node and plan identity.
 
 Give each output field one owner. A node may update a declared source field by
 listing it in both `outputs` and `updates`. Preserve the original source value
@@ -468,7 +473,8 @@ failed, or reused path through the graph.
 Use structured predicates such as `all`, `any`, `field`, `op`, and `value`.
 Supported operators may include `eq`, `ne`, `present`, `empty`, `contains`,
 `gt`, `gte`, `lt`, `lte`, and `in`. Record the evaluated values and skip reason
-for review.
+for review. `in` compares the row value with an explicit list of accepted
+values. The validator and coordinator expose the same operator set.
 
 ### Expansion
 

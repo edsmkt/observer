@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
-import importlib
 import json
 import os
 import sys
@@ -15,15 +13,27 @@ from typing import Any
 
 from batch_synthetic_data import build_rows
 from flow_coordinator import (
-    TERMINAL,
+    REUSABLE,
+    aggregate_node_status,
+    build_plan_id,
     canonical_hash,
     connect,
     emit,
     flow_snapshot,
     graph_event,
+    invoke_node,
+    latest_node_results,
+    matching_result,
+    next_attempt,
+    node_input_hash,
     persist_result,
+    load_source_rows,
+    load_node,
+    ordered_nodes,
     result_map,
+    restore_cached_result,
     row_data,
+    unit_route,
 )
 
 
@@ -42,6 +52,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--state-name", default="synthetic-homepage-batch-labeling")
     parser.add_argument("--delay", type=float, default=0.8)
     parser.add_argument("--provider-rate", type=float, default=20.0)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--full-run", action="store_true")
     return parser.parse_args()
 
 
@@ -68,11 +81,6 @@ def connect_state(path: Path):
     return db
 
 
-def load_node(node: dict):
-    module_name = Path(node["script"]).stem
-    return importlib.import_module(f"nodes.{module_name}").run
-
-
 def chunks(values: list[str], size: int) -> list[list[str]]:
     return [values[index:index + size] for index in range(0, len(values), size)]
 
@@ -82,7 +90,7 @@ def row_status(db, row_key: str) -> tuple[str, str]:
     failures = [result["error"] for result in results.values() if result["status"] == "failed"]
     if failures:
         return "failed", failures[-1]
-    if row_data(db, row_key).get("export_status") == "ready":
+    if row_data(db, row_key).get("export_status") in {"planned", "simulated append"}:
         return "complete", ""
     if any(result["status"] == "held" for result in results.values()):
         return "held", ""
@@ -113,28 +121,22 @@ def emit_record(ledger, run, db, row_key: str, node: dict, nodes: list[dict]) ->
 
 def node_counts(db, node_id: str) -> dict[str, int]:
     counts = {name: 0 for name in ("succeeded", "skipped", "held", "failed", "cached")}
-    for row in db.execute(
-        "SELECT status, COUNT(*) AS count FROM node_results WHERE node_id = ? GROUP BY status",
-        (node_id,),
-    ):
+    for row in latest_node_results(db, node_id):
         if row["status"] in counts:
-            counts[row["status"]] = row["count"]
+            counts[row["status"]] += 1
     return counts
 
 
-def emit_node(ledger, run, db, node: dict, total: int, status: str, **extra: Any) -> None:
+def emit_node(ledger, run, db, node: dict, total: int, _status: str, **extra: Any) -> None:
     counts = node_counts(db, node["id"])
-    spend = db.execute(
-        "SELECT COALESCE(SUM(spend_units),0) AS total FROM node_results WHERE node_id = ?",
-        (node["id"],),
-    ).fetchone()["total"]
+    spend = sum(float(row["spend_units"]) for row in latest_node_results(db, node["id"]))
     emit(
         ledger,
         run,
         "flow_node",
         node_id=node["id"],
         node_label=node.get("label", node["id"]),
-        status=status,
+        status=aggregate_node_status(counts, total, _status),
         total=total,
         completed=sum(counts.values()),
         spend_units=round(float(spend), 4),
@@ -159,7 +161,13 @@ def emit_terminal(
     spend_units: float = 0,
     duration_ms: int = 1,
     batch_id: str = "",
+    input_hash: str = "",
+    attempt: int = 0,
 ) -> None:
+    input_hash = input_hash or node_input_hash(
+        node, row_data(db, row_key), run.dry_run, result_map(db, row_key),
+    )
+    attempt = attempt or next_attempt(db, row_key, node["id"])
     persist_result(
         db,
         row_key,
@@ -171,6 +179,11 @@ def emit_terminal(
         error,
         spend_units,
         duration_ms,
+        run_id=run.scope,
+        table_name=TABLE,
+        node_version=str(node.get("version", "1")),
+        input_hash=input_hash,
+        attempt=attempt,
     )
     event = {
         "node_id": node["id"],
@@ -180,6 +193,9 @@ def emit_terminal(
         "status": status,
         "reason": reason,
         "error": error,
+        "node_version": str(node.get("version", "1")),
+        "input_hash": input_hash,
+        "unit_attempt": attempt,
         "duration_ms": duration_ms,
         "spend_units": spend_units,
     }
@@ -201,11 +217,12 @@ def execute_map_unit(
     provider_rate: float,
     delay: float,
 ) -> str:
-    prior = db.execute(
-        "SELECT * FROM node_results WHERE row_key = ? AND node_id = ?",
-        (row_key, node["id"]),
-    ).fetchone()
-    if prior and prior["status"] in TERMINAL:
+    current = row_data(db, row_key)
+    dependencies = result_map(db, row_key)
+    input_hash = node_input_hash(node, current, run.dry_run, dependencies)
+    prior = matching_result(db, row_key, node["id"], input_hash)
+    if prior and prior["status"] in REUSABLE:
+        restore_cached_result(db, row_key, prior)
         emit(
             ledger,
             run,
@@ -216,18 +233,16 @@ def execute_map_unit(
             key=row_key,
             status="cached",
             reason="reused durable node result",
+            node_version=prior["node_version"],
+            input_hash=input_hash,
+            unit_attempt=prior["attempt"],
             duration_ms=prior["duration_ms"],
             spend_units=0,
         )
         emit_record(ledger, run, db, row_key, node, nodes)
         return prior["status"]
 
-    dependencies = result_map(db, row_key)
-    blocked = [
-        dependency
-        for dependency in node.get("needs", [])
-        if dependencies.get(dependency, {}).get("status") in {"failed", "held"}
-    ]
+    route, route_reason = unit_route(node, current, dependencies)
     emit(
         ledger,
         run,
@@ -239,11 +254,19 @@ def execute_map_unit(
         status="running",
     )
     started = time.monotonic()
-    if blocked:
-        status = "held"
+    attempt = next_attempt(db, row_key, node["id"])
+    if route == "skipped":
+        status = "skipped"
         fields: dict[str, Any] = {}
         evidence: dict[str, Any] = {}
-        reason = "waiting on a usable upstream result"
+        reason = route_reason
+        error = ""
+        spend_units = 0.0
+    elif route == "held":
+        status = "held"
+        fields = {}
+        evidence = {}
+        reason = route_reason
         error = ""
         spend_units = 0.0
     else:
@@ -252,7 +275,7 @@ def execute_map_unit(
             if spend:
                 from runguard import throttle
                 throttle(f"demo-{spend['provider']}", provider_rate)
-            result = node_run(row_data(db, row_key))
+            result = invoke_node(node_run, node, current, run.dry_run)
             status = "succeeded"
             fields = dict(result.get("fields", {}))
             evidence = dict(result.get("evidence", {}))
@@ -281,6 +304,8 @@ def execute_map_unit(
         error=error,
         spend_units=spend_units,
         duration_ms=duration_ms,
+        input_hash=input_hash,
+        attempt=attempt,
     )
     run.checkpoint(node["id"], row_key)
     run.check_controls(after_record=True)
@@ -315,6 +340,278 @@ def complete_batch(db, batch_id: str) -> None:
         )
 
 
+def execute_batch_node(
+    ledger,
+    run,
+    db,
+    node: dict,
+    nodes: list[dict],
+    rows: list[dict],
+    *,
+    requested_batch_size: int,
+    provider_rate: float,
+    delay: float,
+    throttle,
+) -> int:
+    """Run one batch node over eligible rows and persist each member by stable key."""
+    batch_size = max(
+        1,
+        min(requested_batch_size, int(node.get("batch", {}).get("max_items", requested_batch_size))),
+    )
+    key_field = "domain"
+    ready_keys: list[str] = []
+    cached_keys: list[str] = []
+    member_hashes: dict[str, str] = {}
+    cached_results: dict[str, dict] = {}
+
+    emit_node(ledger, run, db, node, len(rows), "running", provider_calls=0)
+    for source_row in rows:
+        key = str(source_row[key_field])
+        current = row_data(db, key)
+        dependencies = result_map(db, key)
+        input_hash = node_input_hash(node, current, run.dry_run, dependencies)
+        member_hashes[key] = input_hash
+        prior = matching_result(db, key, node["id"], input_hash)
+        if prior and prior["status"] in REUSABLE:
+            cached_results[key] = dict(prior)
+            cached_keys.append(key)
+            restore_cached_result(db, key, prior)
+            emit(
+                ledger,
+                run,
+                "flow_unit",
+                node_id=node["id"],
+                node_label=node.get("label", node["id"]),
+                table=TABLE,
+                key=key,
+                status="cached",
+                reason="reused durable batch member result",
+                node_version=prior["node_version"],
+                input_hash=input_hash,
+                unit_attempt=prior["attempt"],
+                duration_ms=prior["duration_ms"],
+                spend_units=0,
+            )
+            emit_record(ledger, run, db, key, node, nodes)
+            continue
+
+        route, reason = unit_route(node, current, dependencies)
+        if route == "execute":
+            ready_keys.append(key)
+            continue
+        emit_terminal(
+            ledger,
+            run,
+            db,
+            key,
+            node,
+            nodes,
+            status=route,
+            reason=reason,
+            input_hash=input_hash,
+        )
+        run.checkpoint(node["id"], key)
+        run.check_controls(after_record=True)
+
+    cached_groups = chunks(cached_keys, batch_size)
+    pending_groups = chunks(ready_keys, batch_size)
+    total_batches = len(cached_groups) + len(pending_groups)
+    batches_completed = 0
+    provider_calls = 0
+
+    for keys in cached_groups:
+        batches_completed += 1
+        digest = canonical_hash({
+            "node_id": node["id"],
+            "keys": keys,
+            "input_hashes": [member_hashes[key] for key in keys],
+        }).split(":", 1)[1][:7]
+        original_spend = sum(float(cached_results[key]["spend_units"]) for key in keys)
+        emit(
+            ledger,
+            run,
+            "flow_batch",
+            node_id=node["id"],
+            node_label=node.get("label", node["id"]),
+            batch_id=f"{node['id']}-cached-{batches_completed:02d}-{digest}",
+            position=batches_completed,
+            total_batches=total_batches,
+            status="cached",
+            items=len(keys),
+            spend_units=0,
+            original_spend_units=round(original_spend, 4),
+            saved_units=round(original_spend, 4),
+            reused_response=True,
+            provider_called=False,
+        )
+        emit_node(
+            ledger,
+            run,
+            db,
+            node,
+            len(rows),
+            "running",
+            batches_completed=batches_completed,
+            batches_total=total_batches,
+            provider_calls=provider_calls,
+        )
+
+    batch_run = load_node(node)
+    for keys in pending_groups:
+        batches_completed += 1
+        digest = canonical_hash({
+            "node_id": node["id"],
+            "keys": keys,
+            "input_hashes": [member_hashes[key] for key in keys],
+        }).split(":", 1)[1][:7]
+        batch_id = f"{node['id']}-{batches_completed:02d}-{digest}"
+        with db:
+            db.execute(
+                """
+                INSERT OR IGNORE INTO batch_calls
+                  (batch_id,node_id,position,total_batches,status,row_keys_json,request_id,
+                   response_json,spend_units,individual_equivalent_units,error,updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    batch_id,
+                    node["id"],
+                    batches_completed,
+                    total_batches,
+                    "planned",
+                    json.dumps(keys),
+                    "",
+                    "",
+                    0,
+                    len(keys),
+                    "",
+                    time.time(),
+                ),
+            )
+        emit(
+            ledger,
+            run,
+            "flow_batch",
+            node_id=node["id"],
+            node_label=node.get("label", node["id"]),
+            batch_id=batch_id,
+            position=batches_completed,
+            total_batches=total_batches,
+            status="running",
+            items=len(keys),
+            row_keys=keys,
+        )
+        for key in keys:
+            emit(
+                ledger,
+                run,
+                "flow_unit",
+                node_id=node["id"],
+                node_label=node.get("label", node["id"]),
+                table=TABLE,
+                key=key,
+                status="running",
+                batch_id=batch_id,
+            )
+
+        batch_record = db.execute(
+            "SELECT response_json FROM batch_calls WHERE batch_id = ?", (batch_id,)
+        ).fetchone()
+        stored = batch_record["response_json"]
+        reused_response = bool(stored)
+        if stored:
+            response = json.loads(stored)
+        else:
+            throttle(f"demo-{node.get('spend', {}).get('provider', node['id'])}", provider_rate)
+            time.sleep(max(0.0, delay * 4.0))
+            response = batch_run([row_data(db, key) for key in keys], batch_id=batch_id)
+            save_batch_response(db, batch_id, response)
+            provider_calls += 1
+
+        batch_started = time.monotonic()
+        succeeded = failed = 0
+        for key in keys:
+            member = response.get("results", {}).get(key)
+            if member is None:
+                member = {
+                    "status": "failed",
+                    "fields": {"label_batch_id": batch_id, "label_status": "response missing"},
+                    "evidence": {"request_id": response.get("request_id", "")},
+                    "error": "Batch response omitted this member",
+                    "spend_units": 0,
+                }
+            status = member.get("status", "succeeded")
+            succeeded += status == "succeeded"
+            failed += status == "failed"
+            emit_terminal(
+                ledger,
+                run,
+                db,
+                key,
+                node,
+                nodes,
+                status=status,
+                fields=dict(member.get("fields", {})),
+                evidence=dict(member.get("evidence", {})),
+                reason="batch member result committed" if status == "succeeded" else "batch member failed",
+                error=str(member.get("error", "")),
+                spend_units=float(member.get("spend_units", 0)),
+                duration_ms=max(1, int((time.monotonic() - batch_started) * 1000)),
+                batch_id=batch_id,
+                input_hash=member_hashes[key],
+            )
+        complete_batch(db, batch_id)
+        saved = round(
+            float(response["individual_equivalent_units"]) - float(response["spend_units"]), 4
+        )
+        emit(
+            ledger,
+            run,
+            "flow_batch",
+            node_id=node["id"],
+            node_label=node.get("label", node["id"]),
+            batch_id=batch_id,
+            position=batches_completed,
+            total_batches=total_batches,
+            status="complete",
+            items=len(keys),
+            succeeded=succeeded,
+            failed=failed,
+            request_id=response["request_id"],
+            spend_units=float(response["spend_units"]),
+            individual_equivalent_units=float(response["individual_equivalent_units"]),
+            saved_units=saved,
+            reused_response=reused_response,
+            provider_called=not reused_response,
+        )
+        emit_node(
+            ledger,
+            run,
+            db,
+            node,
+            len(rows),
+            "running",
+            batches_completed=batches_completed,
+            batches_total=total_batches,
+            provider_calls=provider_calls,
+        )
+        run.checkpoint(node["id"], batch_id)
+        run.check_controls(after_record=True)
+
+    emit_node(
+        ledger,
+        run,
+        db,
+        node,
+        len(rows),
+        "complete",
+        batches_completed=batches_completed,
+        batches_total=total_batches,
+        provider_calls=provider_calls,
+    )
+    return provider_calls
+
+
 def main() -> int:
     args = parse_args()
     state_dir = Path(args.state_dir).expanduser().resolve()
@@ -327,26 +624,20 @@ def main() -> int:
     flow_path = Path(args.flow).expanduser().resolve()
     flow = json.loads(flow_path.read_text(encoding="utf-8"))
     rows = build_rows(max(1, min(args.limit, len(build_rows()))))
-    nodes = flow["nodes"]
-    scripts = {
-        node["id"]: hashlib.sha256((HERE / node["script"]).read_bytes()).hexdigest()
-        for node in nodes
-    }
-    plan_id = canonical_hash({"flow": flow, "scripts": scripts, "batch_size": args.batch_size})
+    nodes = ordered_nodes(flow["nodes"])
+    plan_id = build_plan_id(
+        flow,
+        batch_size=args.batch_size,
+        provider_rate=args.provider_rate,
+    )
     state_name = "".join(char if char.isalnum() or char in "-_" else "-" for char in args.state_name)
     db = connect_state(state_dir / f"{state_name}.flow.sqlite3")
-    now = time.time()
-    with db:
-        for row in rows:
-            db.execute(
-                "INSERT OR IGNORE INTO rows(row_key,data_json,updated_at) VALUES (?,?,?)",
-                (row["domain"], json.dumps(row, sort_keys=True), now),
-            )
+    load_source_rows(db, rows, "domain")
 
     run = start_observed_run(
         "observer-flow-batch-demo",
         source=str(HERE / "batch_synthetic_data.py"),
-        dry_run=True,
+        dry_run=args.dry_run,
         description="Individual homepage scraping followed by discounted batch labeling",
         todo=len(rows),
         progress_table=TABLE,
@@ -379,329 +670,66 @@ def main() -> int:
             emit_record(ledger, run, db, row["domain"], source_node, nodes)
             time.sleep(max(0.0, args.delay * 0.04))
 
-        scrape_node, batch_node, export_node = nodes
-        scrape_run = load_node(scrape_node)
-        export_run = load_node(export_node)
-
-        emit_node(ledger, run, db, scrape_node, len(rows), "running", provider_calls=0)
-        for position, row in enumerate(rows, start=1):
-            execute_map_unit(
-                ledger,
-                run,
-                db,
-                row["domain"],
-                scrape_node,
-                nodes,
-                scrape_run,
-                provider_rate=args.provider_rate,
-                delay=args.delay * 0.45,
-            )
-            calls = sum(node_counts(db, scrape_node["id"])[name] for name in ("succeeded", "failed"))
-            emit_node(
-                ledger,
-                run,
-                db,
-                scrape_node,
-                len(rows),
-                "running",
-                provider_calls=calls,
-                position=position,
-            )
-        emit_node(ledger, run, db, scrape_node, len(rows), "complete", provider_calls=len(rows))
-
-        blocked_keys: list[str] = []
-        ready_keys: list[str] = []
-        for row in rows:
-            key = row["domain"]
-            status = result_map(db, key).get(scrape_node["id"], {}).get("status")
-            (ready_keys if status == "succeeded" else blocked_keys).append(key)
-
-        batch_size = max(1, min(args.batch_size, int(batch_node.get("batch", {}).get("max_items", args.batch_size))))
-        groups = chunks(ready_keys, batch_size)
-        total_batches = len(groups)
-        emit_node(
-            ledger,
-            run,
-            db,
-            batch_node,
-            len(rows),
-            "running",
-            batches_completed=0,
-            batches_total=total_batches,
-            provider_calls=0,
-        )
-
-        for key in blocked_keys:
-            emit_terminal(
-                ledger,
-                run,
-                db,
-                key,
-                batch_node,
-                nodes,
-                status="held",
-                reason="waiting on a usable homepage",
-            )
-            emit_terminal(
-                ledger,
-                run,
-                db,
-                key,
-                export_node,
-                nodes,
-                status="held",
-                reason="waiting on a usable batch label",
-            )
-
-        batch_run = load_node(batch_node)
-        for position, keys in enumerate(groups, start=1):
-            digest = canonical_hash(keys).split(":", 1)[1][:7]
-            batch_id = f"label-{position:02d}-{digest}"
-            with db:
-                db.execute(
-                    """
-                    INSERT OR IGNORE INTO batch_calls
-                      (batch_id,node_id,position,total_batches,status,row_keys_json,request_id,
-                       response_json,spend_units,individual_equivalent_units,error,updated_at)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-                    """,
-                    (
-                        batch_id,
-                        batch_node["id"],
-                        position,
-                        total_batches,
-                        "planned",
-                        json.dumps(keys),
-                        "",
-                        "",
-                        0,
-                        len(keys),
-                        "",
-                        time.time(),
-                    ),
-                )
-            batch_record = db.execute(
-                "SELECT * FROM batch_calls WHERE batch_id = ?", (batch_id,)
-            ).fetchone()
-            prior_results = {
-                key: result_map(db, key).get(batch_node["id"], {})
-                for key in keys
-            }
-            fully_cached = (
-                batch_record["status"] == "complete"
-                and all(prior_results[key].get("status") in TERMINAL for key in keys)
-            )
-            if fully_cached:
-                original_spend = float(batch_record["spend_units"])
-                individual = float(batch_record["individual_equivalent_units"])
-                emit(
-                    ledger,
-                    run,
-                    "flow_batch",
-                    node_id=batch_node["id"],
-                    node_label=batch_node["label"],
-                    batch_id=batch_id,
-                    position=position,
-                    total_batches=total_batches,
-                    status="cached",
-                    items=len(keys),
-                    spend_units=0,
-                    original_spend_units=original_spend,
-                    saved_units=round(individual - original_spend, 4),
-                    reused_response=True,
-                    provider_called=False,
-                )
-                for key in keys:
-                    emit(
-                        ledger,
-                        run,
-                        "flow_unit",
-                        node_id=batch_node["id"],
-                        node_label=batch_node["label"],
-                        table=TABLE,
-                        key=key,
-                        status="cached",
-                        reason="reused durable batch member result",
-                        batch_id=batch_id,
-                        spend_units=0,
-                    )
-                    emit_record(ledger, run, db, key, batch_node, nodes)
-                    execute_map_unit(
-                        ledger,
-                        run,
-                        db,
-                        key,
-                        export_node,
-                        nodes,
-                        export_run,
-                        provider_rate=args.provider_rate,
-                        delay=0,
-                    )
-                emit_node(
+        for node in nodes:
+            mode = node.get("mode")
+            if mode == "batch":
+                execute_batch_node(
                     ledger,
                     run,
                     db,
-                    batch_node,
-                    len(rows),
-                    "running",
-                    batches_completed=position,
-                    batches_total=total_batches,
-                    provider_calls=position,
-                )
-                emit_node(ledger, run, db, export_node, len(rows), "running", provider_calls=0)
-                run.checkpoint(batch_node["id"], batch_id)
-                run.check_controls(after_record=True)
-                continue
-            emit(
-                ledger,
-                run,
-                "flow_batch",
-                node_id=batch_node["id"],
-                node_label=batch_node["label"],
-                batch_id=batch_id,
-                position=position,
-                total_batches=total_batches,
-                status="running",
-                items=len(keys),
-                row_keys=keys,
-            )
-            for key in keys:
-                if prior_results[key].get("status") in TERMINAL:
-                    emit(
-                        ledger,
-                        run,
-                        "flow_unit",
-                        node_id=batch_node["id"],
-                        node_label=batch_node["label"],
-                        table=TABLE,
-                        key=key,
-                        status="cached",
-                        reason="reused durable batch member result",
-                        batch_id=batch_id,
-                    )
-                else:
-                    emit(
-                        ledger,
-                        run,
-                        "flow_unit",
-                        node_id=batch_node["id"],
-                        node_label=batch_node["label"],
-                        table=TABLE,
-                        key=key,
-                        status="running",
-                        batch_id=batch_id,
-                    )
-
-            stored = db.execute(
-                "SELECT response_json FROM batch_calls WHERE batch_id = ?", (batch_id,)
-            ).fetchone()["response_json"]
-            reused_response = bool(stored)
-            if stored:
-                response = json.loads(stored)
-            else:
-                throttle("demo-synthetic_batch_label_api", args.provider_rate)
-                time.sleep(max(0.0, args.delay * 4.0))
-                response = batch_run([row_data(db, key) for key in keys], batch_id=batch_id)
-                save_batch_response(db, batch_id, response)
-
-            batch_started = time.monotonic()
-            succeeded = failed = 0
-            for key in keys:
-                if prior_results[key].get("status") in TERMINAL:
-                    succeeded += prior_results[key].get("status") == "succeeded"
-                    failed += prior_results[key].get("status") == "failed"
-                    emit_record(ledger, run, db, key, batch_node, nodes)
-                    continue
-                member = response.get("results", {}).get(key)
-                if member is None:
-                    member = {
-                        "status": "failed",
-                        "fields": {"label_batch_id": batch_id, "label_status": "response missing"},
-                        "evidence": {"request_id": response.get("request_id", "")},
-                        "error": "Batch response omitted this member",
-                        "spend_units": 0,
-                    }
-                status = member.get("status", "succeeded")
-                succeeded += status == "succeeded"
-                failed += status == "failed"
-                emit_terminal(
-                    ledger,
-                    run,
-                    db,
-                    key,
-                    batch_node,
+                    node,
                     nodes,
-                    status=status,
-                    fields=dict(member.get("fields", {})),
-                    evidence=dict(member.get("evidence", {})),
-                    reason="batch member result committed" if status == "succeeded" else "batch member failed",
-                    error=str(member.get("error", "")),
-                    spend_units=float(member.get("spend_units", 0)),
-                    duration_ms=max(1, int((time.monotonic() - batch_started) * 1000)),
-                    batch_id=batch_id,
+                    rows,
+                    requested_batch_size=args.batch_size,
+                    provider_rate=args.provider_rate,
+                    delay=args.delay,
+                    throttle=throttle,
                 )
-            complete_batch(db, batch_id)
-            saved = round(float(response["individual_equivalent_units"]) - float(response["spend_units"]), 4)
-            emit(
-                ledger,
-                run,
-                "flow_batch",
-                node_id=batch_node["id"],
-                node_label=batch_node["label"],
-                batch_id=batch_id,
-                position=position,
-                total_batches=total_batches,
-                status="complete",
-                items=len(keys),
-                succeeded=succeeded,
-                failed=failed,
-                request_id=response["request_id"],
-                spend_units=float(response["spend_units"]),
-                individual_equivalent_units=float(response["individual_equivalent_units"]),
-                saved_units=saved,
-                reused_response=reused_response,
-                provider_called=not reused_response,
-            )
-            emit_node(
-                ledger,
-                run,
-                db,
-                batch_node,
-                len(rows),
-                "running",
-                batches_completed=position,
-                batches_total=total_batches,
-                provider_calls=position,
-            )
-
-            for key in keys:
+                continue
+            if mode not in {"map", "sink"}:
+                raise ValueError(
+                    f"compact batch demo supports map, batch, and sink nodes; "
+                    f"{node['id']} uses {mode!r}"
+                )
+            node_run = load_node(node)
+            emit_node(ledger, run, db, node, len(rows), "running", provider_calls=0)
+            for position, row in enumerate(rows, start=1):
                 execute_map_unit(
                     ledger,
                     run,
                     db,
-                    key,
-                    export_node,
+                    row["domain"],
+                    node,
                     nodes,
-                    export_run,
+                    node_run,
                     provider_rate=args.provider_rate,
-                    delay=args.delay * 0.08,
+                    delay=args.delay * (0.45 if node.get("spend") else 0.08),
                 )
-            emit_node(ledger, run, db, export_node, len(rows), "running", provider_calls=0)
-            run.checkpoint(batch_node["id"], batch_id)
-            run.check_controls(after_record=True)
-
-        emit_node(
-            ledger,
-            run,
-            db,
-            batch_node,
-            len(rows),
-            "complete",
-            batches_completed=total_batches,
-            batches_total=total_batches,
-            provider_calls=total_batches,
-        )
-        emit_node(ledger, run, db, export_node, len(rows), "complete", provider_calls=0)
+                calls = sum(
+                    node_counts(db, node["id"])[name] for name in ("succeeded", "failed")
+                )
+                emit_node(
+                    ledger,
+                    run,
+                    db,
+                    node,
+                    len(rows),
+                    "running",
+                    provider_calls=calls if node.get("spend") else 0,
+                    position=position,
+                )
+            emit_node(
+                ledger,
+                run,
+                db,
+                node,
+                len(rows),
+                "complete",
+                provider_calls=(
+                    sum(node_counts(db, node["id"])[name] for name in ("succeeded", "failed"))
+                    if node.get("spend") else 0
+                ),
+            )
 
         final_rows = [row_data(db, row["domain"]) for row in rows]
         label_counts = Counter(row.get("label") for row in final_rows if row.get("label"))
@@ -737,6 +765,7 @@ def main() -> int:
             labels=dict(sorted(label_counts.items())),
             failed=failed,
             plan_id=plan_id,
+            execution_mode="dry_run" if run.dry_run else "full_run",
         )
         return 0
     except BaseException as exc:

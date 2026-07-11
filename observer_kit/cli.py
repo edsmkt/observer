@@ -15,17 +15,21 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+PACKAGE_SKILLS = Path(__file__).resolve().parent / "_skills"
 
 
 def _skill_dir() -> Path:
     env_dir = os.environ.get("OBSERVER_KIT_SKILL_DIR")
     if env_dir:
         return Path(env_dir).expanduser().resolve()
-    candidates = [
-        ROOT / "skills" / "observer-kit",          # source checkout / editable install
-        Path(sys.prefix) / "skills" / "observer-kit",  # wheel data_files install
+    candidates = []
+    if (ROOT / "pyproject.toml").is_file():
+        candidates.append(ROOT / "skills" / "observer-kit")  # source checkout
+    candidates.extend([
+        PACKAGE_SKILLS / "observer-kit",  # wheel-owned resources
+        Path(sys.prefix) / "skills" / "observer-kit",  # legacy wheel layout
         Path(sys.base_prefix) / "skills" / "observer-kit",
-    ]
+    ])
     return next((p for p in candidates if p.exists()), candidates[0])
 
 
@@ -106,6 +110,7 @@ def cmd_test(args: argparse.Namespace) -> int:
         [sys.executable, str(skill_file("test_lint_emit.py"))],
         [sys.executable, str(skill_file("test_skill.py")), str(SKILL_DIR)],
         [sys.executable, str(skill_file("test_dashboard.py"))],
+        [sys.executable, str(skill_file("test_dashboard_browser.py"))],
         [sys.executable, str(skill_file("test_cli.py"))],
     ]
     flow_skill_dir = SKILL_DIR.parent / "observer-flow"
@@ -114,6 +119,9 @@ def cmd_test(args: argparse.Namespace) -> int:
             [sys.executable, str(flow_skill_dir / "test_validate_flow.py"), str(flow_skill_dir)],
             [sys.executable, str(flow_skill_dir / "test_skill.py"), str(flow_skill_dir)],
         ])
+    demo_test = ROOT / "examples" / "observer-flow-demo" / "test_flow_coordinator.py"
+    if demo_test.is_file():
+        tests.append([sys.executable, str(demo_test)])
     for cmd in tests:
         rc = subprocess.call(cmd)
         if rc:
@@ -427,6 +435,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     checks.append(("state dir ignores local ledger data", (project / args.state_dir / ".gitignore").exists()))
     checks.append(("operator explainer exists", (project / args.state_dir / "EXPLAIN.md").exists()))
     checks.append(("dashboard available", skill_file("run_dashboard.py").exists()))
+    checks.append(("dashboard asset available", skill_file("assets/dashboard.js").exists()))
     checks.append(("watcher available", skill_file("watch_chat.py").exists()))
     checks.append(("tests available", skill_file("test_runguard.py").exists()))
 
