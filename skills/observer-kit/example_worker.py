@@ -3,7 +3,7 @@
 
 Start the dashboard first, then run a reviewed sample and an intentional write:
 
-  observer-kit dashboard .runguard
+  observer-kit dashboard .observer
   python3 example_worker.py --table alpha --dry-run --limit 2
   python3 example_worker.py --table alpha --full-run
 
@@ -86,7 +86,7 @@ def main() -> int:
     if args.limit is not None:
         rows = rows[:max(0, args.limit)]
 
-    output = (args.output or Path('.runguard') / f'example-{args.table}-output.jsonl').resolve()
+    output = (args.output or Path('.observer') / f'example-{args.table}-output.jsonl').resolve()
     source = f'observer-kit-example:{args.table}'
     run = start_observed_run(
         'example-transform',

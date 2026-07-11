@@ -38,8 +38,24 @@ For new scripts, prefer the boring wrapper:
 
 It still uses the same lock, ledger, dashboard feed, and state dir below.
 
-State dir: $RUNGUARD_STATE_DIR, else ./.runguard next to this file. All
+State dir: $RUNGUARD_STATE_DIR, else ./.observer next to this file. All
 processes that should coordinate must use the SAME state dir.
+
+Layout (one continuous lane per workstream):
+
+  .observer/
+    EXPLAIN.md              # optional project template seed (copied into new lanes)
+    runs/
+      <lane>/               # one folder per continuous resume surface
+        events.jsonl        # append-only ledger for this lane
+        EXPLAIN.md          # operational card for this process
+        chat.jsonl          # operator notes for this lane
+        controls.jsonl      # pause/stop/approve for this lane
+    *.lock / *.throttle     # shared machine coordination at the root only
+
+Legacy flat ledgers and root chat/controls files are still read when present so
+older projects keep their history. Locks and throttles stay at the root because
+they coordinate across processes and lanes on one machine.
 """
 from __future__ import annotations
 
@@ -56,7 +72,7 @@ import time
 import weakref
 
 _STATE_DIR = os.environ.get('RUNGUARD_STATE_DIR') or os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '.runguard')
+    os.path.dirname(os.path.abspath(__file__)), '.observer')
 
 _held: dict[str, tuple[str, int, int]] = {}  # name -> (path, fd, refcount)
 _ledgers: dict[str, str] = {}
@@ -187,15 +203,140 @@ def _lane_cache_key(scope: str) -> str:
     return f'{session}\0{scope}' if session else scope
 
 
+def _lane_slug(scope: str) -> str:
+    """Stable directory name for one continuous lane (session + scope)."""
+    scope_name = _safe_component(scope, 'scope')
+    session_name = _session_slug()
+    return f'{session_name}-{scope_name}' if session_name else scope_name
+
+
+def _lane_dir(slug: str) -> str:
+    """Directory for one continuous lane under ``runs/<slug>/``."""
+    return os.path.join(_STATE_DIR, 'runs', slug)
+
+
+def _lane_events_path(slug: str) -> str:
+    """Preferred ledger path: ``runs/<slug>/events.jsonl``."""
+    return os.path.join(_lane_dir(slug), 'events.jsonl')
+
+
+def _lane_legacy_path(slug: str) -> str:
+    """Pre-folder flat ledger path: ``<slug>.jsonl`` at the state-dir root."""
+    return os.path.join(_STATE_DIR, f'{slug}.jsonl')
+
+
+def _run_id_for_ledger_path(path: str) -> str:
+    """Map a ledger filesystem path to the dashboard run id ``runguard:<lane>``."""
+    path = os.path.abspath(path)
+    base = os.path.basename(path)
+    if base == 'events.jsonl':
+        return f'runguard:{os.path.basename(os.path.dirname(path))}'
+    if base.endswith('.jsonl'):
+        return f'runguard:{base[:-6]}'
+    return f'runguard:{base}'
+
+
+def _lane_from_run_id(run_id: object) -> str:
+    """Extract the lane folder name from ``runguard:<lane>`` (optional ``.jsonl``)."""
+    raw = str(run_id or '').strip()
+    if not raw or raw == 'all':
+        return ''
+    _kind, sep, name = raw.partition(':')
+    if sep:
+        raw = name
+    raw = os.path.basename(raw)
+    if raw.endswith('.jsonl'):
+        raw = raw[:-6]
+    if not raw or raw in {'.', '..'}:
+        return ''
+    return raw
+
+
+def _ensure_lane_explain(slug: str) -> None:
+    """Seed ``runs/<slug>/EXPLAIN.md`` from the project template when missing."""
+    if not slug:
+        return
+    dest = os.path.join(_lane_dir(slug), 'EXPLAIN.md')
+    if os.path.isfile(dest):
+        return
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    for src in (
+        os.path.join(_STATE_DIR, 'EXPLAIN.md'),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'EXPLAIN.md'),
+    ):
+        if not os.path.isfile(src):
+            continue
+        try:
+            with open(src, encoding='utf-8') as fh:
+                text = fh.read()
+            with open(dest, 'w', encoding='utf-8') as fh:
+                fh.write(text)
+            return
+        except OSError:
+            continue
+
+
+def _side_channel_path(filename: str, run_id: object | None = None) -> str:
+    """Preferred path for chat/controls: ``runs/<lane>/<file>``, else state root.
+
+    Project-wide presence uses ``run_id='all'`` and stays at the state root.
+    """
+    lane = _lane_from_run_id(run_id)
+    if lane:
+        return os.path.join(_lane_dir(lane), filename)
+    return os.path.join(_STATE_DIR, filename)
+
+
+def _side_channel_read_paths(filename: str, run_id: object | None = None) -> list[str]:
+    """Paths to scan for chat/controls, preferred first then legacy root."""
+    paths: list[str] = []
+    lane = _lane_from_run_id(run_id)
+    if lane:
+        paths.append(os.path.join(_lane_dir(lane), filename))
+        # Legacy: one shared root file filtered by run id.
+        paths.append(os.path.join(_STATE_DIR, filename))
+    elif run_id in (None, '', 'all'):
+        root = os.path.join(_STATE_DIR, filename)
+        paths.append(root)
+        runs_root = os.path.join(_STATE_DIR, 'runs')
+        if os.path.isdir(runs_root):
+            for name in sorted(os.listdir(runs_root)):
+                candidate = os.path.join(runs_root, name, filename)
+                if os.path.isfile(candidate):
+                    paths.append(candidate)
+    else:
+        paths.append(os.path.join(_STATE_DIR, filename))
+    # De-dupe while preserving order.
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for path in paths:
+        real = os.path.abspath(path)
+        if real in seen:
+            continue
+        seen.add(real)
+        ordered.append(path)
+    return ordered
+
+
 def _lane_path(scope: str) -> str:
-    """Return the continuous ledger path for a scope in the selected lane."""
+    """Return the continuous ledger path for a scope in the selected lane.
+
+    New lanes write ``runs/<slug>/events.jsonl``. If only a legacy flat
+    ``<slug>.jsonl`` exists, keep appending there so resume history stays one
+    continuous file.
+    """
     cache_key = _lane_cache_key(scope)
     if cache_key not in _ledgers:
         os.makedirs(_STATE_DIR, exist_ok=True)
-        scope_name = _safe_component(scope, 'scope')
-        session_name = _session_slug()
-        name = f"{session_name}-{scope_name}.jsonl" if session_name else f"{scope_name}.jsonl"
-        _ledgers[cache_key] = os.path.join(_STATE_DIR, name)
+        slug = _lane_slug(scope)
+        preferred = _lane_events_path(slug)
+        legacy = _lane_legacy_path(slug)
+        if os.path.isfile(legacy) and not os.path.isfile(preferred):
+            _ledgers[cache_key] = legacy
+        else:
+            os.makedirs(os.path.dirname(preferred), exist_ok=True)
+            _ensure_lane_explain(slug)
+            _ledgers[cache_key] = preferred
     return _ledgers[cache_key]
 
 
@@ -422,8 +563,9 @@ def replay_fixture(path: str) -> list:
     return value if isinstance(value, list) else [value]
 
 
-def _control_path() -> str:
-    return os.path.join(_STATE_DIR, 'controls.jsonl')
+def _control_path(run_id: object | None = None) -> str:
+    """Write path for control requests (per-lane when ``run_id`` is a lane)."""
+    return _side_channel_path('controls.jsonl', run_id)
 
 
 def post_control(run_id: str, kind: str, note: str = '') -> dict:
@@ -432,14 +574,30 @@ def post_control(run_id: str, kind: str, note: str = '') -> dict:
         raise ValueError(f'unsupported control request: {kind}')
     rec = {'id': _canonical_hash([run_id, kind, note, time.time_ns(), os.getpid()])[:20],
            'ts': _timestamp(), 'run': str(run_id), 'kind': kind, 'note': str(note)[:1000]}
-    _append_jsonl(_control_path(), rec)
+    path = _control_path(run_id)
+    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+    if _lane_from_run_id(run_id):
+        _ensure_lane_explain(_lane_from_run_id(run_id))
+    _append_jsonl(path, rec)
     return rec
 
 
 def read_controls(run_id: str | None = None) -> list:
     """Read durable operator control requests, newest last."""
-    return [rec for rec in _iter_jsonl(_control_path())
-            if not run_id or rec.get('run') == run_id]
+    out = []
+    lane = _lane_from_run_id(run_id) if run_id else ''
+    lane_control = os.path.abspath(_control_path(run_id)) if lane else ''
+    for path in _side_channel_read_paths('controls.jsonl', run_id):
+        path_abs = os.path.abspath(path)
+        for rec in _iter_jsonl(path):
+            tagged = rec.get('run')
+            if run_id and tagged and tagged != run_id:
+                continue
+            if run_id and not tagged and path_abs != lane_control:
+                # Untagged rows only count from the lane's own controls file.
+                continue
+            out.append(rec)
+    return out
 
 
 def source_scope(workflow: str, source: str) -> str:
@@ -622,7 +780,8 @@ def ledger(scope: str, event: str, **fields) -> None:
     "· was X", and chat notes / ✓ persist across re-runs.
 
     Set RUNGUARD_SESSION=<slug> only to open a SEPARATE lane (a dated slug for a
-    fresh weekly run, or a unique label for a clean A/B) → '<slug>-<scope>.jsonl'."""
+    fresh weekly run, or a unique label for a clean A/B) →
+    ``runs/<session>-<scope>/events.jsonl``."""
     path = _lane_path(scope)
     # Reserved keys always win so a **row payload cannot clobber event identity.
     rec = dict(fields)
@@ -631,7 +790,7 @@ def ledger(scope: str, event: str, **fields) -> None:
     _append_jsonl(path, rec)
     if event == 'run_started':
         # Marker used by the CLI and harness hooks to create or reuse one watcher.
-        rid = f'runguard:{os.path.basename(path)}'
+        rid = _run_id_for_ledger_path(path)
         sys.stderr.write(
             f"OBSERVER_RUN_STARTED {rid}\n"
             f"[observer] observer-kit run creates or reuses this run's chat watcher.\n"
@@ -643,11 +802,14 @@ def ledger_path(scope: str) -> str | None:
 
 
 def current_run_id(scope: str) -> str | None:
-    """The dashboard run id for this scope's ledger ('runguard:<file>'). Pass it to
-    read_chat/post_chat so chat lands on the same run the dashboard is showing.
-    With RUNGUARD_SESSION pinned this stays stable across re-runs, so notes persist."""
+    """The dashboard run id for this scope's ledger (``runguard:<lane>``).
+
+    Pass it to read_chat/post_chat so chat lands on the same run the dashboard is
+    showing. With RUNGUARD_SESSION pinned this stays stable across re-runs, so
+    notes persist.
+    """
     p = _ledgers.get(_lane_cache_key(scope))
-    return f'runguard:{os.path.basename(p)}' if p else None
+    return _run_id_for_ledger_path(p) if p else None
 
 
 def schema_errors(record: dict, contract: dict | None = None) -> list[str]:
@@ -1508,13 +1670,11 @@ def throttle(resource: str, per_second: float) -> None:
 
 
 # ---- inline-dashboard chat (the run_dashboard.py "chat in the cells" inbox) ----
-# The dashboard WRITES operator notes here (anchored to a column/cell); the agent
-# PULLS them to receive feedback and replies with post_chat(author='agent').
-# Delivery is a pull, never a push: read at the start of your next turn, or poll
-# between rounds of a long run for a stop/adjust signal. Same _STATE_DIR as the
-# dashboard's SOURCES['runguard'] — all coordinating processes must share it.
-def _chat_path() -> str:
-    return os.path.join(_STATE_DIR, 'chat.jsonl')
+# The dashboard WRITES operator notes into the lane's chat.jsonl; the agent
+# PULLS them with post_chat(author='agent'). Delivery is a pull, never a push.
+# Project-wide poll presence uses run_id='all' at the state-dir root.
+def _chat_path(run_id: object | None = None) -> str:
+    return _side_channel_path('chat.jsonl', run_id)
 
 
 def read_chat(run_id: str | None = None, after_ts: str | None = None,
@@ -1522,26 +1682,35 @@ def read_chat(run_id: str | None = None, after_ts: str | None = None,
     """Operator notes left in the dashboard, newest last. Filter to one run,
     to messages after a timestamp (to see only what's new since you last read),
     and/or by author ('user' for operator notes you haven't answered yet)."""
-    path = _chat_path()
     out = []
-    if not os.path.exists(path):
-        return out
-    with open(path, encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                m = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if run_id and m.get('run') != run_id:
-                continue
-            if after_ts and _ts_order_key(m.get('ts')) <= _ts_order_key(after_ts):
-                continue
-            if author and m.get('author') != author:
-                continue
-            out.append(m)
+    lane = _lane_from_run_id(run_id) if run_id else ''
+    lane_chat = os.path.abspath(_chat_path(run_id)) if lane else ''
+    for path in _side_channel_read_paths('chat.jsonl', run_id):
+        if not os.path.exists(path):
+            continue
+        path_abs = os.path.abspath(path)
+        try:
+            with open(path, encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        m = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    tagged = m.get('run')
+                    if run_id and run_id != 'all' and tagged and tagged != run_id:
+                        continue
+                    if run_id and run_id != 'all' and not tagged and path_abs != lane_chat:
+                        continue
+                    if after_ts and _ts_order_key(m.get('ts')) <= _ts_order_key(after_ts):
+                        continue
+                    if author and m.get('author') != author:
+                        continue
+                    out.append(m)
+        except OSError:
+            continue
     return out
 
 
@@ -1550,10 +1719,13 @@ def post_chat(run_id: str, anchor: str, text: str, author: str = 'agent',
     """Reply into the dashboard thread (shows under the same column/cell). The
     agent uses this to answer an operator note; `anchor` must match the note's.
     Pass resolved=True when the note is handled — the cell's badge flips to a ✓."""
-    os.makedirs(_STATE_DIR, exist_ok=True)
+    path = _chat_path(run_id)
+    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+    if _lane_from_run_id(run_id):
+        _ensure_lane_explain(_lane_from_run_id(run_id))
     rec = {'ts': _timestamp(), 'run': run_id,
            'anchor': anchor, 'author': author, 'text': text, 'resolved': bool(resolved)}
-    with open(_chat_path(), 'a', encoding='utf-8') as f:
+    with open(path, 'a', encoding='utf-8') as f:
         f.write(json.dumps(rec, ensure_ascii=False, default=str) + '\n')
 
 

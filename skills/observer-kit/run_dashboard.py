@@ -8,8 +8,12 @@ control, chat, schema, and Observer Flow events without assuming a business
 domain. Dashboard chat and controls use separate side-channel files; run ledgers
 remain append-only.
 
-Two ledger layouts are supported: the normal flat runguard directory and an
-optional directory of per-run folders containing ``events.jsonl``.
+Ledger layouts supported under the state directory:
+
+- Preferred: ``runs/<lane>/events.jsonl`` (one continuous lane folder)
+- Legacy flat: ``<lane>.jsonl`` at the state-dir root
+- Optional external ``push`` library: sibling ``runs/<id>/events.jsonl`` next to
+  this script
 
 Usage:  python3 run_dashboard.py   (then open http://localhost:8484)
 Stdlib only. Localhost only.
@@ -24,8 +28,8 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 # This is a run-once GLOBAL observer, not a per-project file to vendor. Point it at
 # any project's ledger dir — no editing needed:
-#     python3 run_dashboard.py /path/to/.runguard          (positional arg)
-#     RUNGUARD_STATE_DIR=/path/to/.runguard python3 run_dashboard.py   (env)
+#     python3 run_dashboard.py /path/to/.observer          (positional arg)
+#     RUNGUARD_STATE_DIR=/path/to/.observer python3 run_dashboard.py   (env)
 #     python3 run_dashboard.py <dir> --port 8485
 # One instance observes any ledger directory; chat and controls use side files.
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -72,15 +76,14 @@ def _parse_cli(argv):
 
 
 _arg_dir, PORT = _parse_cli(sys.argv)
-_runguard_dir = _arg_dir or os.environ.get('RUNGUARD_STATE_DIR') or os.path.join(BASE, '.runguard')
+_runguard_dir = _arg_dir or os.environ.get('RUNGUARD_STATE_DIR') or os.path.join(BASE, '.observer')
 SOURCES = {
     'runguard': _runguard_dir,                          # runguard ledgers + locks
     'push': os.path.join(BASE, 'runs'),                 # per-run subdirs (optional)
 }
-# Operator requests are separate from run ledgers. Notes wake the harness; control
-# requests are durable input for a script to acknowledge at a safe checkpoint.
-CHAT_FILE = os.path.join(SOURCES['runguard'], 'chat.jsonl')
-CONTROL_FILE = os.path.join(SOURCES['runguard'], 'controls.jsonl')
+# Operator notes and controls live in each lane folder under runs/<lane>/.
+# Project-wide presence (run="all") and legacy flat projects still use the
+# state-dir root. Locks/throttles stay at the state-dir root.
 ACTIVE_S = 120   # a file touched in the last 2 min counts as live
 EVENT_READ_BYTES = 512 * 1024
 LAST_EVENT_READ_BYTES = 128 * 1024
@@ -89,6 +92,54 @@ _SUMMARY_LOCK = threading.Lock()
 _AUXILIARY_JSONL = {'chat.jsonl', 'controls.jsonl'}
 _CONTROL_LOCK = threading.Lock()
 _CHAT_LOCK = threading.Lock()
+# Backward-compatible aliases used by older tests; prefer *_path_for(run).
+CHAT_FILE = os.path.join(SOURCES['runguard'], 'chat.jsonl')
+CONTROL_FILE = os.path.join(SOURCES['runguard'], 'controls.jsonl')
+
+
+def _side_channel_path(filename, run_id=None):
+    """Write path for chat/controls: ``runs/<lane>/<file>`` or state root."""
+    root = SOURCES['runguard']
+    lane = _lane_name(run_id) if run_id not in (None, '', 'all') else ''
+    if lane and str(run_id) != 'all':
+        return os.path.join(root, 'runs', lane, filename)
+    return os.path.join(root, filename)
+
+
+def chat_path_for(run_id=None):
+    return _side_channel_path('chat.jsonl', run_id)
+
+
+def control_path_for(run_id=None):
+    return _side_channel_path('controls.jsonl', run_id)
+
+
+def _iter_side_channel_paths(filename, run_id=None):
+    """Preferred lane file first, then legacy root; or every lane for a full poll."""
+    root = SOURCES['runguard']
+    paths = []
+    if run_id and run_id != 'all':
+        lane = _lane_name(run_id)
+        if lane:
+            paths.append(os.path.join(root, 'runs', lane, filename))
+        paths.append(os.path.join(root, filename))
+    else:
+        paths.append(os.path.join(root, filename))
+        runs_root = os.path.join(root, 'runs')
+        if os.path.isdir(runs_root):
+            for name in sorted(os.listdir(runs_root)):
+                candidate = os.path.join(runs_root, name, filename)
+                if os.path.isfile(candidate):
+                    paths.append(candidate)
+    seen = set()
+    ordered = []
+    for path in paths:
+        key = os.path.abspath(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(path)
+    return ordered
 
 
 def _timestamp():
@@ -230,21 +281,63 @@ def _is_run_ledger(filename):
             not filename.endswith('.receipts.jsonl'))
 
 
+def _lane_name(name):
+    """Normalize a run id or ledger name to a lane folder name.
+
+    Accepts ``runguard:<lane>``, ``runguard:<lane>.jsonl``, or a bare lane name.
+    """
+    raw = str(name or '').strip()
+    if not raw or raw == 'all':
+        return ''
+    _kind, sep, tail = raw.partition(':')
+    if sep:
+        raw = tail
+    raw = os.path.basename(raw)
+    if raw.endswith('.jsonl'):
+        raw = raw[:-6]
+    if not raw or raw in {'.', '..'}:
+        return ''
+    return raw
+
+
+def _path_under(root, candidate):
+    """Return realpath of candidate when it is strictly inside root, else None."""
+    root = os.path.realpath(root)
+    candidate = os.path.realpath(candidate)
+    prefix = root + os.sep
+    if candidate == root or not candidate.startswith(prefix):
+        return None
+    return candidate
+
+
 def _run_ledger_path(run_id):
-    """Resolve a dashboard run id to its ledger without permitting path escape."""
+    """Resolve a dashboard run id to its ledger without permitting path escape.
+
+    Preferred Observer layout is ``runs/<lane>/events.jsonl`` with run id
+    ``runguard:<lane>``. Legacy flat ``runguard:<lane>.jsonl`` files and ids
+    ending in ``.jsonl`` still resolve.
+    """
     kind, sep, name = str(run_id).partition(':')
     root = SOURCES.get(kind)
     if not sep or not root or not name or os.path.basename(name) != name:
         return None
     if kind == 'push':
         candidate = os.path.join(root, os.path.basename(name), 'events.jsonl')
-    else:
-        candidate = os.path.join(root, os.path.basename(name))
-    root = os.path.realpath(root)
-    candidate = os.path.realpath(candidate)
-    if kind == 'push':
-        return candidate if os.path.dirname(os.path.dirname(candidate)) == root else None
-    return candidate if os.path.dirname(candidate) == root else None
+        resolved = _path_under(root, candidate)
+        return resolved if resolved and os.path.dirname(os.path.dirname(resolved)) == os.path.realpath(root) else None
+
+    lane = _lane_name(name)
+    if not lane or lane in ('.', '..'):
+        return None
+    folder = os.path.join(root, 'runs', lane, 'events.jsonl')
+    flat_name = name if str(name).endswith('.jsonl') else f'{lane}.jsonl'
+    flat = os.path.join(root, flat_name)
+    for candidate in (folder, flat):
+        resolved = _path_under(root, candidate)
+        if resolved and os.path.isfile(resolved):
+            return resolved
+    # Canonical target for new folder-style lanes (may not exist yet).
+    return _path_under(root, folder)
 
 
 def _acknowledged_control_ids(run_id):
@@ -270,28 +363,30 @@ def _acknowledged_control_ids(run_id):
 
 def _pending_control(run_id, kind):
     """Return the latest unacknowledged request for this run action, if any."""
-    if not os.path.isfile(CONTROL_FILE):
-        return None
     acknowledged = _acknowledged_control_ids(run_id)
     pending = None
-    try:
-        with open(CONTROL_FILE, encoding='utf-8') as fh:
-            for line in fh:
-                try:
-                    control = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if control.get('run') == run_id and control.get('kind') == kind:
-                    if str(control.get('id')) not in acknowledged:
-                        pending = control
-    except OSError:
-        return None
+    for path in _iter_side_channel_paths('controls.jsonl', run_id):
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding='utf-8') as fh:
+                for line in fh:
+                    try:
+                        control = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if control.get('run') == run_id and control.get('kind') == kind:
+                        if str(control.get('id')) not in acknowledged:
+                            pending = control
+        except OSError:
+            continue
     return pending
 
 
 def list_runs():
     runs = []
     now = time.time()
+    seen_paths = set()
     push_dir = SOURCES['push']
     if os.path.isdir(push_dir):
         for d in os.listdir(push_dir):
@@ -303,28 +398,63 @@ def list_runs():
                              'desc': _describe(_summary_event(ev)), 'kind': 'push',
                              'path': os.path.abspath(os.path.join(push_dir, d)),
                              'mtime': mtime, 'live': _is_live_run(ev, mtime, now)})
+                seen_paths.add(os.path.realpath(ev))
     for kind, d in SOURCES.items():
         if kind == 'push':
             continue
-        if os.path.isdir(d):
-            for f in os.listdir(d):
-                if _is_run_ledger(f):
-                    p = os.path.join(d, f)
-                    summary = _summary_event(p)
-                    if (summary.get('event') or summary.get('action')) != 'run_started':
-                        continue
-                    mtime = os.path.getmtime(p)
-                    name, when = _nice_name(f, kind)
-                    # Prefer operator-facing description over hashed scope names.
-                    desc = _describe(summary)
-                    pretty = (
-                        str(summary.get('description') or summary.get('name') or '').strip()
-                        or name
-                    )
-                    runs.append({'id': f'{kind}:{f}', 'label': f, 'name': pretty, 'when': when,
-                                 'desc': desc, 'kind': kind,
-                                 'path': os.path.abspath(p),
-                                 'mtime': mtime, 'live': _is_live_run(p, mtime, now)})
+        if not os.path.isdir(d):
+            continue
+        # Preferred: one folder per continuous lane under runs/<lane>/events.jsonl
+        lanes_root = os.path.join(d, 'runs')
+        if os.path.isdir(lanes_root):
+            for lane in os.listdir(lanes_root):
+                lane_dir = os.path.join(lanes_root, lane)
+                ev = os.path.join(lane_dir, 'events.jsonl')
+                if not os.path.isfile(ev):
+                    continue
+                real_ev = os.path.realpath(ev)
+                if real_ev in seen_paths:
+                    continue
+                summary = _summary_event(ev)
+                if (summary.get('event') or summary.get('action')) != 'run_started':
+                    continue
+                mtime = os.path.getmtime(ev)
+                name, when = _nice_name(lane, kind)
+                desc = _describe(summary)
+                pretty = (
+                    str(summary.get('description') or summary.get('name') or '').strip()
+                    or name
+                )
+                runs.append({'id': f'{kind}:{lane}', 'label': lane, 'name': pretty,
+                             'when': when, 'desc': desc, 'kind': kind,
+                             'path': os.path.abspath(lane_dir),
+                             'mtime': mtime, 'live': _is_live_run(ev, mtime, now)})
+                seen_paths.add(real_ev)
+        # Legacy flat ledgers at the state-dir root
+        for f in os.listdir(d):
+            if not _is_run_ledger(f):
+                continue
+            p = os.path.join(d, f)
+            real_p = os.path.realpath(p)
+            if real_p in seen_paths:
+                continue
+            summary = _summary_event(p)
+            if (summary.get('event') or summary.get('action')) != 'run_started':
+                continue
+            mtime = os.path.getmtime(p)
+            name, when = _nice_name(f, kind)
+            desc = _describe(summary)
+            pretty = (
+                str(summary.get('description') or summary.get('name') or '').strip()
+                or name
+            )
+            # Keep the historical id form for flat files (includes ``.jsonl``)
+            # so existing dashboard hashes and chat tags keep resolving.
+            runs.append({'id': f'{kind}:{f}', 'label': f, 'name': pretty, 'when': when,
+                         'desc': desc, 'kind': kind,
+                         'path': os.path.abspath(p),
+                         'mtime': mtime, 'live': _is_live_run(p, mtime, now)})
+            seen_paths.add(real_p)
     runs.sort(key=lambda r: -r['mtime'])
     return runs
 
@@ -392,10 +522,11 @@ def _heal_stale_listening(msgs: list) -> list:
             'reason': 'stale_listening',
             'stale_pid': pid,
         }
+        chat_path = chat_path_for(run)
         try:
-            os.makedirs(os.path.dirname(CHAT_FILE) or '.', exist_ok=True)
+            os.makedirs(os.path.dirname(chat_path) or '.', exist_ok=True)
             with _CHAT_LOCK:
-                with open(CHAT_FILE, 'a', encoding='utf-8') as fh:
+                with open(chat_path, 'a', encoding='utf-8') as fh:
                     fh.write(json.dumps(idle, ensure_ascii=False) + '\n')
                     fh.flush()
                     os.fsync(fh.fileno())
@@ -415,7 +546,8 @@ def _files_for(run_id):
         # Only the events ledger is a business/record stream. api-calls.jsonl is a
         # request log — injecting it made every HTTP line look like a Data-tab row.
         return [primary] if os.path.exists(primary) else []
-    if not _is_run_ledger(name):
+    # Folder lanes use runguard:<lane>; legacy ids may still end in .jsonl.
+    if name.endswith('.jsonl') and not _is_run_ledger(name) and os.path.basename(primary) != 'events.jsonl':
         return []
     return [primary] if os.path.exists(primary) else []
 
@@ -792,7 +924,8 @@ class Handler(BaseHTTPRequestHandler):
             text = (data.get('text') or '').strip()[:2000]
             # Agent presence / typing indicator (not a user note).
             if kind == 'agent_status' and run and status in {'listening', 'responding', 'idle'}:
-                os.makedirs(os.path.dirname(CHAT_FILE) or '.', exist_ok=True)
+                chat_path = chat_path_for(run)
+                os.makedirs(os.path.dirname(chat_path) or '.', exist_ok=True)
                 labels = {
                     'listening': 'Agent is listening',
                     'responding': 'Agent is responding',
@@ -804,7 +937,7 @@ class Handler(BaseHTTPRequestHandler):
                     'text': text or labels.get(status, f'Agent is {status}'),
                 }
                 with _CHAT_LOCK:
-                    with open(CHAT_FILE, 'a', encoding='utf-8') as fh:
+                    with open(chat_path, 'a', encoding='utf-8') as fh:
                         fh.write(json.dumps(rec, ensure_ascii=False) + '\n')
                         fh.flush()
                         os.fsync(fh.fileno())
@@ -813,13 +946,14 @@ class Handler(BaseHTTPRequestHandler):
             if author not in {'user', 'agent', 'system'}:
                 author = 'user'
             if text and run and anchor:
-                os.makedirs(os.path.dirname(CHAT_FILE) or '.', exist_ok=True)
+                chat_path = chat_path_for(run)
+                os.makedirs(os.path.dirname(chat_path) or '.', exist_ok=True)
                 rec = {'ts': _timestamp(), 'run': run,
                        'anchor': anchor, 'author': author, 'text': text}
                 if data.get('resolved') is not None:
                     rec['resolved'] = bool(data.get('resolved'))
                 with _CHAT_LOCK:
-                    with open(CHAT_FILE, 'a', encoding='utf-8') as fh:
+                    with open(chat_path, 'a', encoding='utf-8') as fh:
                         fh.write(json.dumps(rec, ensure_ascii=False) + '\n')
                         # Agent replies clear the responding spinner.
                         if author == 'agent':
@@ -840,7 +974,8 @@ class Handler(BaseHTTPRequestHandler):
             note = str(data.get('note') or '').strip()[:1000]
             notify = data.get('notify') is not False
             if run and kind in {'pause', 'stop_after_record', 'approve_full_run'}:
-                os.makedirs(os.path.dirname(CONTROL_FILE), exist_ok=True)
+                control_path = control_path_for(run)
+                os.makedirs(os.path.dirname(control_path) or '.', exist_ok=True)
                 with _CONTROL_LOCK:
                     pending = _pending_control(run, kind)
                     if pending:
@@ -848,17 +983,19 @@ class Handler(BaseHTTPRequestHandler):
                         return
                     rec = {'id': f'{time.time_ns():x}', 'ts': _timestamp(), 'run': run,
                            'kind': kind, 'note': note}
-                    with open(CONTROL_FILE, 'a', encoding='utf-8') as fh:
+                    with open(control_path, 'a', encoding='utf-8') as fh:
                         fh.write(json.dumps(rec, ensure_ascii=False) + '\n')
                         fh.flush()
                         os.fsync(fh.fileno())
                     if notify:
                         # Control transport wakes the watcher without posing as an operator note.
+                        chat_path = chat_path_for(run)
                         chat = {'ts': rec['ts'], 'run': run, 'anchor': 'run', 'author': 'system',
                                 'kind': 'control', 'control_id': rec['id'],
                                 'text': f"Control request: {kind.replace('_', ' ')}"}
                         with _CHAT_LOCK:
-                            with open(CHAT_FILE, 'a', encoding='utf-8') as fh:
+                            os.makedirs(os.path.dirname(chat_path) or '.', exist_ok=True)
+                            with open(chat_path, 'a', encoding='utf-8') as fh:
                                 fh.write(json.dumps(chat, ensure_ascii=False) + '\n')
                                 fh.flush()
                                 os.fsync(fh.fileno())
@@ -904,21 +1041,29 @@ class Handler(BaseHTTPRequestHandler):
             q = parse_qs(u.query)
             run = (q.get('run') or [''])[0]
             msgs = []
-            if os.path.isfile(CHAT_FILE):
-                with open(CHAT_FILE, encoding='utf-8') as fh:
-                    for line in fh:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            m = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        # Project-wide poll presence uses run="all".
-                        if (not run or m.get('run') == run
-                                or (m.get('kind') == 'agent_status'
-                                    and m.get('run') == 'all')):
-                            msgs.append(m)
+            for path in _iter_side_channel_paths('chat.jsonl', run or None):
+                if not os.path.isfile(path):
+                    continue
+                try:
+                    with open(path, encoding='utf-8') as fh:
+                        for line in fh:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                m = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+                            # Project-wide poll presence uses run="all".
+                            if (not run or m.get('run') == run
+                                    or (m.get('kind') == 'agent_status'
+                                        and m.get('run') == 'all')
+                                    or (run and not m.get('run')
+                                        and os.path.basename(os.path.dirname(path))
+                                        == _lane_name(run))):
+                                msgs.append(m)
+                except OSError:
+                    continue
             # Drop permanent "listening" badges after a dead poll process.
             msgs = _heal_stale_listening(msgs)
             self._json(msgs)
@@ -926,28 +1071,43 @@ class Handler(BaseHTTPRequestHandler):
             q = parse_qs(u.query)
             run = (q.get('run') or [''])[0]
             controls = []
-            if os.path.isfile(CONTROL_FILE):
-                with open(CONTROL_FILE, encoding='utf-8') as fh:
-                    for line in fh:
-                        try:
-                            control = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        if not run or control.get('run') == run:
-                            controls.append(control)
+            for path in _iter_side_channel_paths('controls.jsonl', run or None):
+                if not os.path.isfile(path):
+                    continue
+                try:
+                    with open(path, encoding='utf-8') as fh:
+                        for line in fh:
+                            try:
+                                control = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+                            if not run or control.get('run') == run:
+                                controls.append(control)
+                except OSError:
+                    continue
             self._json(controls)
         elif u.path == '/api/explain':
-            # Read EXPLAIN.md fresh every time (statement of intent must be current).
+            # Prefer the selected lane's EXPLAIN.md; fall back to project seed.
+            q = parse_qs(u.query)
+            run = (q.get('run') or [''])[0]
             found, md = False, ''
-            seen = set()
+            candidates = []
+            if run:
+                lane = _lane_name(run)
+                if lane:
+                    candidates.append(os.path.join(SOURCES['runguard'], 'runs', lane, 'EXPLAIN.md'))
+            candidates.append(os.path.join(SOURCES['runguard'], 'EXPLAIN.md'))
             for d in [os.environ.get('RUNGUARD_STATE_DIR')] + list(SOURCES.values()) + [BASE]:
-                if not d:
-                    continue
-                p = os.path.abspath(os.path.join(d, 'EXPLAIN.md'))
-                if p in seen or not os.path.isfile(p):
-                    seen.add(p)
+                if d:
+                    candidates.append(os.path.join(d, 'EXPLAIN.md'))
+            seen = set()
+            for p in candidates:
+                p = os.path.abspath(p)
+                if p in seen:
                     continue
                 seen.add(p)
+                if not os.path.isfile(p):
+                    continue
                 try:
                     with open(p, encoding='utf-8') as fh:
                         md, found = fh.read(), True

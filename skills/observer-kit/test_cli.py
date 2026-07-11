@@ -122,7 +122,7 @@ print("Testing Observer Kit CLI end to end\n")
 with tempfile.TemporaryDirectory(prefix="observer-cli-") as tmp:
     project = Path(tmp) / "project"
     init = cli("init", str(project), "--force", cwd=Path.cwd())
-    state = project / ".runguard"
+    state = project / ".observer"
     ok("init vendors workflow helpers", init.returncode == 0 and
        (project / "runguard.py").is_file() and (project / "watch_chat.py").is_file())
     ok("init creates a private state dir", (state / "EXPLAIN.md").is_file() and
@@ -160,7 +160,7 @@ with tempfile.TemporaryDirectory(prefix="observer-cli-") as tmp:
            "attached to existing dashboard" in combined, combined[-500:])
         ok("run discovers the ledger and starts a watcher", marker is not None and
            "watcher connected" in combined, combined[-500:])
-        run_id = marker.group(1) if marker else "runguard:missing.jsonl"
+        run_id = marker.group(1) if marker else "runguard:missing"
         meta = next((item for item in api_json(port, "/api/runs") if item.get("id") == run_id), {})
         ok("dashboard exposes the completed auto-session lane", bool(meta) and not meta.get("live"), str(meta))
 
@@ -227,7 +227,8 @@ with tempfile.TemporaryDirectory(prefix="observer-cli-") as tmp:
 
         failed_run = cli("run", "--state-dir", str(state), "--watch", "none", "--exit-after-run", "--",
                          sys.executable, "-B", "-c", FAILING_WORKER, cwd=project)
-        failure_ledgers = list(state.glob("*cli-failure*.jsonl"))
+        failure_ledgers = list(state.glob("runs/*cli-failure*/events.jsonl")) + list(
+            state.glob("*cli-failure*.jsonl"))
         failure_events = []
         if failure_ledgers:
             failure_events = [json.loads(line) for line in failure_ledgers[0].read_text(encoding="utf-8").splitlines()]
@@ -238,21 +239,21 @@ with tempfile.TemporaryDirectory(prefix="observer-cli-") as tmp:
         watcher_cmd = [sys.executable, "-B", "-m", "observer_kit", "watch", str(state),
                        "--follow", "--poll", "0.05"]
         watch_a = subprocess.Popen(
-            [*watcher_cmd, "--run", "runguard:lease-a.jsonl"], cwd=project, env=CLI_ENV,
+            [*watcher_cmd, "--run", "runguard:lease-a"], cwd=project, env=CLI_ENV,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         watch_b = subprocess.Popen(
-            [*watcher_cmd, "--run", "runguard:lease-b.jsonl"], cwd=project, env=CLI_ENV,
+            [*watcher_cmd, "--run", "runguard:lease-b"], cwd=project, env=CLI_ENV,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         try:
             status = wait_for_watch_status(
-                state, project, ("runguard:lease-a.jsonl", "runguard:lease-b.jsonl"))
+                state, project, ("runguard:lease-a", "runguard:lease-b"))
             ok("different run IDs retain independent watcher ownership",
-               "runguard:lease-a.jsonl" in status and "runguard:lease-b.jsonl" in status,
+               "runguard:lease-a" in status and "runguard:lease-b" in status,
                status)
 
-            duplicate = cli("watch", str(state), "--run", "runguard:lease-a.jsonl",
+            duplicate = cli("watch", str(state), "--run", "runguard:lease-a",
                             "--follow", "--poll", "0.05", cwd=project, timeout=5)
             ok("a second watcher for the same run is refused",
                duplicate.returncode == 3 and "WATCHER ALREADY ACTIVE" in duplicate.stderr,
@@ -295,7 +296,7 @@ with tempfile.TemporaryDirectory(prefix="observer-cli-") as tmp:
            "no active watchers" in final_status, final_status)
 
         # AXI-style poll: listening presence, deliver note, flip to responding.
-        poll_run = "runguard:poll-demo.jsonl"
+        poll_run = "runguard:poll-demo"
         poll_proc = subprocess.Popen(
             [sys.executable, "-B", "-m", "observer_kit", "poll", str(state),
              "--run", poll_run, "--poll", "0.1"],
@@ -305,7 +306,9 @@ with tempfile.TemporaryDirectory(prefix="observer-cli-") as tmp:
         try:
             listening = False
             for _ in range(40):
-                chat_path = state / "chat.jsonl"
+                chat_path = state / "runs" / "poll-demo" / "chat.jsonl"
+                if not chat_path.is_file():
+                    chat_path = state / "chat.jsonl"
                 if chat_path.is_file():
                     rows = [
                         json.loads(line) for line in chat_path.read_text(encoding="utf-8").splitlines()
@@ -323,7 +326,22 @@ with tempfile.TemporaryDirectory(prefix="observer-cli-") as tmp:
             ok("poll marks the run as listening", listening)
 
             # Post a user note while the poll is waiting.
-            with (state / "chat.jsonl").open("a", encoding="utf-8") as fh:
+            def lane_chat(run_name: str) -> Path:
+                path = state / "runs" / run_name / "chat.jsonl"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                return path
+
+            def load_chat(run_name: str) -> list[dict]:
+                rows = []
+                for path in (state / "runs" / run_name / "chat.jsonl", state / "chat.jsonl"):
+                    if not path.is_file():
+                        continue
+                    for line in path.read_text(encoding="utf-8").splitlines():
+                        if line.strip():
+                            rows.append(json.loads(line))
+                return rows
+
+            with lane_chat("poll-demo").open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps({
                     "ts": "2099-01-01T00:00:00.000000001Z",
                     "run": poll_run,
@@ -341,10 +359,7 @@ with tempfile.TemporaryDirectory(prefix="observer-cli-") as tmp:
                and "OBSERVER_CHAT_EVENT" in out
                and "poll me please" in out,
                out + err)
-            chat_rows = [
-                json.loads(line) for line in (state / "chat.jsonl").read_text(encoding="utf-8").splitlines()
-                if line.strip()
-            ]
+            chat_rows = load_chat("poll-demo")
             statuses = [
                 row.get("status") for row in chat_rows
                 if row.get("kind") == "agent_status" and row.get("run") == poll_run
@@ -358,10 +373,7 @@ with tempfile.TemporaryDirectory(prefix="observer-cli-") as tmp:
             )
             ok("reply clears presence to idle",
                reply.returncode == 0 and "replied to" in reply.stdout)
-            chat_rows = [
-                json.loads(line) for line in (state / "chat.jsonl").read_text(encoding="utf-8").splitlines()
-                if line.strip()
-            ]
+            chat_rows = load_chat("poll-demo")
             statuses = [
                 row.get("status") for row in chat_rows
                 if row.get("kind") == "agent_status" and row.get("run") == poll_run
@@ -375,17 +387,20 @@ with tempfile.TemporaryDirectory(prefix="observer-cli-") as tmp:
 
         # poll --reply posts first, then listens (Lavish --agent-reply pattern).
         reply_poll = cli(
-            "poll", str(state), "--run", "runguard:reply-poll.jsonl",
+            "poll", str(state), "--run", "runguard:reply-poll",
             "--reply", "pre-reply", "--resolved", "--timeout", "0.3", "--poll", "0.1",
             cwd=project, timeout=5,
         )
         ok("poll --reply writes the agent message before waiting",
            reply_poll.returncode == 0 and "replied to" in reply_poll.stdout,
            reply_poll.stdout + reply_poll.stderr)
-        reply_rows = [
-            json.loads(line) for line in (state / "chat.jsonl").read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+        reply_rows = []
+        for path in (state / "runs" / "reply-poll" / "chat.jsonl", state / "chat.jsonl"):
+            if path.is_file():
+                reply_rows.extend(
+                    json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                )
         ok("poll --reply durable agent text is in chat",
            any(row.get("author") == "agent" and row.get("text") == "pre-reply" for row in reply_rows))
 

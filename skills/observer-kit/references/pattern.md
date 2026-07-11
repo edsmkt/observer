@@ -68,11 +68,12 @@ The CLI helper path uses that prefix for `init`, `dashboard`, `run`, `watch`,
 
 The bundled-script path works directly from the directory containing
 `SKILL.md`. Copy `runguard.py` and `watch_chat.py` beside the workflow, create
-`.runguard`, and copy `EXPLAIN.md` into it. Start the dashboard as a long-lived
-process, then launch the sample through the active harness session:
+`.observer` (with `runs/` for per-lane ledgers), and copy `EXPLAIN.md` into it.
+Start the dashboard as a long-lived process, then launch the sample through the
+active harness session:
 
 ```bash
-python3 /absolute/skill/path/run_dashboard.py .runguard --port 8484
+python3 /absolute/skill/path/run_dashboard.py .observer --port 8484
 python3 workflow.py --dry-run --limit 10
 ```
 
@@ -80,7 +81,7 @@ As soon as the worker prints `OBSERVER_RUN_STARTED <run-id>`, launch the
 run-scoped watcher in an independent monitor:
 
 ```bash
-python3 watch_chat.py <run-id> --state-dir .runguard --follow
+python3 watch_chat.py <run-id> --state-dir .observer --follow
 ```
 
 Keep the same dashboard and watcher alive for the approved full run. Both paths
@@ -493,29 +494,29 @@ Default to run-scoped ownership so separate agent sessions and run IDs remain
 independent:
 
 ```bash
-observer-kit dashboard .runguard
-observer-kit run --state-dir .runguard -- python3 workflow.py --dry-run --limit 10
+observer-kit dashboard .observer
+observer-kit run --state-dir .observer -- python3 workflow.py --dry-run --limit 10
 ```
 
 `observer-kit run` creates or reuses one watcher for that run. Different run IDs
 may own independent watchers. A single long-lived project session may choose
-`observer-kit watch .runguard --all --follow` for continuous harness bridges.
+`observer-kit watch .observer --all --follow` for continuous harness bridges.
 For the AXI-style agent respond loop (Lavish-like), leave a long-poll running
 so the dashboard shows **listening** and wakes the agent when a note lands:
 
 ```bash
-observer-kit poll .runguard --run runguard:<lane>.jsonl
+observer-kit poll .observer --run runguard:<lane>
 # …operator sends a dashboard note…
 # poll prints OBSERVER_CHAT_EVENT, marks responding, exits
-observer-kit reply .runguard --run runguard:<lane>.jsonl --text "…" --resolved
-observer-kit poll .runguard --run runguard:<lane>.jsonl   # listen again
+observer-kit reply .observer --run runguard:<lane> --text "…" --resolved
+observer-kit poll .observer --run runguard:<lane>   # listen again
 ```
 
 `poll --reply "…"` posts an agent message first (Lavish `--agent-reply`), then
 listens. Notes stay durable if the poll times out — re-run it. Watcher ownership
 refuses overlap
 with run-scoped bridges. Parent-owned watcher children exit with their CLI
-process, and `observer-kit watch .runguard --status` lists current ownership.
+process, and `observer-kit watch .observer --status` lists current ownership.
 
 The watcher emits `OBSERVER_CHAT_EVENT` lines to the active harness. Let this
 bridge own monitoring and use its output or ledger events for completion rather
@@ -523,8 +524,8 @@ than adding polling shells. The harness inspects evidence, edits scripts,
 resumes work, and replies:
 
 ```bash
-observer-kit reply .runguard \
-  --run runguard:my-run.jsonl \
+observer-kit reply .observer \
+  --run runguard:my-run \
   --anchor run \
   --resolved \
   --text "Updated the transform and resumed from the saved checkpoint."
@@ -643,7 +644,14 @@ Active-branch evidence for the workflow's real effects:
 - `runguard.py`: runtime library vendored beside the workflow.
 - `run_dashboard.py`: one localhost server for a state directory.
 - `watch_chat.py`: watcher transport for dashboard messages and controls.
-- `EXPLAIN.md`: operator-facing statement of intent copied into `.runguard`.
+- `.observer/`: project state home. Each continuous lane is a folder under
+  `runs/<lane>/` with `events.jsonl`, `EXPLAIN.md`, `chat.jsonl`, and
+  `controls.jsonl`. Locks and throttles stay at the state-dir root for
+  cross-process coordination. Legacy flat ledgers and root chat/controls still
+  load. Run ids look like `runguard:<lane>`.
+- `EXPLAIN.md`: project template seed under `.observer/`; each new lane gets
+  its own copy under `runs/<lane>/EXPLAIN.md` (process narrative still belongs
+  in Lavish when you need a polished explainer).
 - `references/lint_emit.py`: static liveness/durability heuristic.
 - `example_worker.py`: deterministic dry-run, full-run, and resume example.
 

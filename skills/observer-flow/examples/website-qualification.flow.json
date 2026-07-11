@@ -15,7 +15,7 @@
     ]
   },
   "state": {
-    "store": ".runguard/website-saas-qualification.flow.sqlite3"
+    "store": ".observer/website-saas-qualification.flow.sqlite3"
   },
   "nodes": [
     {

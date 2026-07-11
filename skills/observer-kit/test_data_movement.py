@@ -265,7 +265,8 @@ ok('chat notes posted after a watermark are not dropped',
    len(notes) == 1 and notes[0].get('text') == 'operator note')
 # Mixed second-only vs nanosecond stamps still compare chronologically.
 mixed_since = '2026-07-11T12:00:00.500000000Z'
-with open(os.path.join(STATE, 'chat.jsonl'), 'a', encoding='utf-8') as fh:
+os.makedirs(os.path.join(STATE, 'runs', 'mixed-ts'), exist_ok=True)
+with open(os.path.join(STATE, 'runs', 'mixed-ts', 'chat.jsonl'), 'a', encoding='utf-8') as fh:
     fh.write(json.dumps({
         'ts': '2026-07-11T12:00:00Z', 'run': 'mixed-ts', 'anchor': 'run',
         'author': 'user', 'text': 'before-watermark',

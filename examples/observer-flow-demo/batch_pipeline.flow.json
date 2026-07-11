@@ -14,7 +14,7 @@
     "fields": ["index", "company", "domain", "country", "source", "fixture_kind"]
   },
   "state": {
-    "store": ".runguard/synthetic-homepage-batch-labeling.flow.sqlite3"
+    "store": ".observer/synthetic-homepage-batch-labeling.flow.sqlite3"
   },
   "nodes": [
     {

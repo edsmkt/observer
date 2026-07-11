@@ -7,6 +7,11 @@ import os, sys, json, time, subprocess, tempfile, textwrap
 RG_DIR = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.abspath(__file__))  # dir with runguard.py
 STATE = tempfile.mkdtemp(prefix='rgtest-')
 ENV = {**os.environ, 'RUNGUARD_STATE_DIR': STATE, 'PYTHONPATH': RG_DIR}
+
+
+def lane_events(slug: str) -> str:
+    """Preferred ledger path under runs/<slug>/events.jsonl."""
+    return os.path.join(STATE, 'runs', slug, 'events.jsonl')
 passed, failed = 0, 0
 
 def ok(name, cond, detail=''):
@@ -77,8 +82,8 @@ runguard.ledger('mysrc','run_started',todo=3)
 runguard.ledger('mysrc','record',key='a',company='a.de',status='done')
 """)
 child("import runguard; runguard.ledger('mysrc','record',key='b',company='b.de',status='skipped')")
-files = [p for p in glob.glob(f'{STATE}/*mysrc*.jsonl')]
-ok("ledger continuous-by-source (one file for the scope)", len(files) == 1, f"files={[os.path.basename(f) for f in files]}")
+files = [p for p in glob.glob(f'{STATE}/runs/*/events.jsonl') if 'mysrc' in p]
+ok("ledger continuous-by-source (one file for the scope)", len(files) == 1, f"files={files}")
 if files:
     lines = [json.loads(l) for l in open(files[0]) if l.strip()]
     ok("all events appended in order across processes", len(lines) == 3 and lines[0]['event']=='run_started' and lines[-1]['key']=='b', f"n={len(lines)}")
@@ -88,14 +93,14 @@ if files:
 env2 = {**ENV, 'RUNGUARD_SESSION': '2099-01-01-lane'}
 subprocess.run([sys.executable,'-c','import runguard; runguard.ledger("mysrc","run_started",todo=1)'],
                env=env2, timeout=20)
-laned = glob.glob(f'{STATE}/2099-01-01-lane-mysrc.jsonl')
-ok("RUNGUARD_SESSION creates a separate lane file", len(laned) == 1, f"{[os.path.basename(f) for f in laned]}")
+laned = glob.glob(f'{STATE}/runs/2099-01-01-lane-mysrc/events.jsonl')
+ok("RUNGUARD_SESSION creates a separate lane folder", len(laned) == 1, f"{laned}")
 
 # ---- 8. Boring wrapper: lock + dry-run + steps + counters + checkpoints ----
 rc8, out8, err8 = child("""
 import json, os, runguard
 run = runguard.start_observed_run('wrapper-demo', dry_run=True, description='demo')
-assert run.run_id == 'runguard:wrapper-demo.jsonl'
+assert run.run_id == 'runguard:wrapper-demo'
 with run.step('enrich_lead', table='companies', key='lead-1', company='acme'):
     run.count('leads_enriched')
     run.checkpoint('last_lead', 'lead-1')
@@ -105,11 +110,11 @@ runguard.acquire_lock('wrapper-demo')
 runguard.release_lock('wrapper-demo')
 print(runguard.ledger_path('wrapper-demo'))
 """)
-ok("start_observed_run closes and releases its lock", rc8 == 0 and 'wrapper-demo.jsonl' in out8,
+ok("start_observed_run closes and releases its lock", rc8 == 0 and 'runs' in out8 and 'events.jsonl' in out8,
    f"rc={rc8} err={err8.strip()[:120]}")
-wrapper_files = glob.glob(f'{STATE}/wrapper-demo.jsonl')
-if wrapper_files:
-    wrapper_lines = [json.loads(l) for l in open(wrapper_files[0]) if l.strip()]
+wrapper_path = lane_events('wrapper-demo')
+if os.path.isfile(wrapper_path):
+    wrapper_lines = [json.loads(l) for l in open(wrapper_path) if l.strip()]
     ok("wrapper logs dry-run run_started", wrapper_lines[0]['event'] == 'run_started' and wrapper_lines[0]['dry_run'] is True)
     ok("ledger timestamps are explicit UTC", wrapper_lines[0]['ts'].endswith('Z'))
     ok("wrapper step records running then done",
@@ -147,7 +152,7 @@ import runguard
 runguard.start_observed_run('abandoned-demo')
 raise RuntimeError('boom')
 """)
-abandoned = os.path.join(STATE, 'abandoned-demo.jsonl')
+abandoned = lane_events('abandoned-demo')
 abandoned_events = [json.loads(line).get('event') for line in open(abandoned) if line.strip()]
 ok("unhandled exits log run_abandoned", rc11 != 0 and abandoned_events[-1] == 'run_abandoned', str(abandoned_events))
 
@@ -207,7 +212,7 @@ stress = [subprocess.Popen([sys.executable, '-c', stress_code, str(w), str(EVENT
           for w in range(WRITERS)]
 for proc in stress:
     proc.wait(timeout=30)
-stress_path = os.path.join(STATE, 'append-stress.jsonl')
+stress_path = lane_events('append-stress')
 try:
     stress_events = [json.loads(line) for line in open(stress_path, encoding='utf-8') if line.strip()]
 except (OSError, json.JSONDecodeError) as exc:
@@ -230,7 +235,7 @@ try:
 except ValueError as exc:
     run.fail(exc)
 """)
-step_exception_path = os.path.join(STATE, 'step-exception.jsonl')
+step_exception_path = lane_events('step-exception')
 step_exception_events = [json.loads(line) for line in open(step_exception_path) if line.strip()]
 ok("step exceptions retain row failure and terminal failure",
    rc15 == 0

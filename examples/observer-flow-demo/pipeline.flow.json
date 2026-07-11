@@ -21,7 +21,7 @@
     ]
   },
   "state": {
-    "store": ".runguard/synthetic-account-routing.flow.sqlite3"
+    "store": ".observer/synthetic-account-routing.flow.sqlite3"
   },
   "nodes": [
     {

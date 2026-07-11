@@ -100,8 +100,8 @@ ok("cookbook contract uses positive steering", not cookbook_negations,
    str(cookbook_negations[:10]))
 
 ok("skill uses the CLI surface that exists today",
-   "observer-kit run --state-dir .runguard" in skill and
-   "observer-kit dashboard .runguard" in skill and
+   "observer-kit run --state-dir .observer" in skill and
+   "observer-kit dashboard .observer" in skill and
    "observer-kit flow" not in skill)
 ok("one node can own several coherent fields",
    "A node may produce several related fields from one call" in skill and

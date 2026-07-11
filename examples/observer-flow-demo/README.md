@@ -16,18 +16,18 @@ purpose so the row trace and Attention view have useful states to inspect.
 From the repository root:
 
 ```bash
-mkdir -p examples/observer-flow-demo/.runguard
+mkdir -p examples/observer-flow-demo/.observer
 cp examples/observer-flow-demo/EXPLAIN.md \
-  examples/observer-flow-demo/.runguard/EXPLAIN.md
+  examples/observer-flow-demo/.observer/EXPLAIN.md
 python3 -B -m observer_kit dashboard \
-  examples/observer-flow-demo/.runguard --port 8532
+  examples/observer-flow-demo/.observer --port 8532
 ```
 
 In another terminal:
 
 ```bash
 python3 -B examples/observer-flow-demo/flow_coordinator.py \
-  --state-dir examples/observer-flow-demo/.runguard \
+  --state-dir examples/observer-flow-demo/.observer \
   --session live-flow-demo --limit 30 --delay 0.8 --dry-run
 ```
 
@@ -39,7 +39,7 @@ same lane and state:
 
 ```bash
 python3 -B examples/observer-flow-demo/flow_coordinator.py \
-  --state-dir examples/observer-flow-demo/.runguard \
+  --state-dir examples/observer-flow-demo/.observer \
   --session live-flow-demo --limit 30 --delay 0.8 --full-run
 ```
 
@@ -66,9 +66,9 @@ Keep the same dashboard running and launch a separate lane:
 
 ```bash
 cp examples/observer-flow-demo/BATCH_EXPLAIN.md \
-  examples/observer-flow-demo/.runguard/EXPLAIN.md
+  examples/observer-flow-demo/.observer/EXPLAIN.md
 python3 -B examples/observer-flow-demo/batch_flow_coordinator.py \
-  --state-dir examples/observer-flow-demo/.runguard \
+  --state-dir examples/observer-flow-demo/.observer \
   --session batch-flow-demo --limit 24 --batch-size 6 --delay 0.8 --dry-run
 ```
 

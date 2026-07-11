@@ -97,7 +97,7 @@ subflow.
 An Observer Flow coordinator runs through the same CLI and dashboard:
 
 ```bash
-observer-kit run --state-dir .runguard -- \
+observer-kit run --state-dir .observer -- \
   python3 flow_coordinator.py --flow pipeline.flow.json --dry-run --limit 10
 ```
 
@@ -231,31 +231,32 @@ script or flow coordinator:
 
 ```bash
 observer-kit init .
-observer-kit dashboard .runguard --port 8484
+observer-kit dashboard .observer --port 8484
 ```
 
-`init` adds the small Python helper, a private `.runguard` state directory, and
-an `EXPLAIN.md` template. Keep the dashboard running while the agent works.
+`init` adds the small Python helper, a private `.observer` state directory
+(with `runs/` for per-lane ledgers), and an `EXPLAIN.md` template. Keep the
+dashboard running while the agent works.
 
 With a skill-only installation, ask the agent to use Observer Kit's
 bundled-script path. It copies `runguard.py` and `watch_chat.py` beside the
-workflow, creates `.runguard`, copies the `EXPLAIN.md` template, and launches
-`run_dashboard.py` directly with its adjacent `assets/dashboard.js` file. The
-resulting locks, ledgers, controls, chat, and dashboard are the same as the CLI
-path.
+workflow, creates `.observer` (including `runs/`), copies the `EXPLAIN.md`
+template, and launches `run_dashboard.py` directly with its adjacent
+`assets/dashboard.js` file. The resulting locks, per-lane ledgers, controls,
+chat, and dashboard are the same as the CLI path.
 
 Then ask your agent to wire Observer Kit into the real script. With the CLI, a
 typical first run is:
 
 ```bash
-observer-kit run --state-dir .runguard --dashboard -- \
+observer-kit run --state-dir .observer --dashboard -- \
   python3 enrich_companies.py --dry-run --limit 10
 ```
 
 After you review the sample and explicitly approve it:
 
 ```bash
-observer-kit run --state-dir .runguard -- \
+observer-kit run --state-dir .observer -- \
   python3 enrich_companies.py --full-run
 ```
 
@@ -265,7 +266,7 @@ watchers. For one long-lived project session, an all-run watcher can cover the
 project and subsequent runs reuse it. Check ownership with:
 
 ```bash
-observer-kit watch .runguard --status
+observer-kit watch .observer --status
 ```
 
 The watcher remains transport; your agent makes decisions and requests full-run approval.
@@ -348,9 +349,9 @@ For dependency-driven workflows, see the
 ```bash
 observer-kit init [project]
 observer-kit dashboard [state_dir] --port 8484
-observer-kit run --state-dir .runguard -- python3 workflow.py --dry-run --limit 10
-observer-kit watch .runguard --run runguard:my-run.jsonl --follow
-observer-kit reply .runguard --run runguard:my-run.jsonl --anchor run --text "I fixed this."
+observer-kit run --state-dir .observer -- python3 workflow.py --dry-run --limit 10
+observer-kit watch .observer --run runguard:my-run --follow
+observer-kit reply .observer --run runguard:my-run --anchor run --text "I fixed this."
 observer-kit doctor [project]
 observer-kit test
 ```

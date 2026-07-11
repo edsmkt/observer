@@ -50,7 +50,7 @@ Use the CLI surface verified by `observer-kit --help`. The baseline execution
 path works today:
 
 ```bash
-observer-kit run --state-dir .runguard -- \
+observer-kit run --state-dir .observer -- \
   python3 flow_coordinator.py --flow pipeline.flow.json --dry-run --limit 10
 ```
 
@@ -163,8 +163,8 @@ on its business row and Flow view, and one scheduler owns graph dispatch.
 Start the dashboard first, then run a stratified sample through the coordinator:
 
 ```bash
-observer-kit dashboard .runguard
-observer-kit run --state-dir .runguard -- \
+observer-kit dashboard .observer
+observer-kit run --state-dir .observer -- \
   python3 flow_coordinator.py --flow pipeline.flow.json --dry-run --limit 10
 ```
 

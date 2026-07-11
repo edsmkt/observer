@@ -205,7 +205,7 @@ ok('canary visibility and watcher ownership are explicit contracts',
    'Different run IDs may own independent watchers' in pattern_words and
    'Parent-owned watcher children exit with their CLI process' in pattern_words and
    'through `selected`, `writing`, `verifying`, and `verified` or `failed`' in pattern_words and
-   'observer-kit watch .runguard --status' in pattern_words)
+   'observer-kit watch .observer --status' in pattern_words)
 ok('sample verification separates universal proof from active branches',
    'verify this universal minimum' in prove_words and
    'Verify every selected branch' in prove_words and
@@ -234,8 +234,8 @@ ok('skill supports both CLI-helper and bundled-script launch paths',
    'bundled-script path' in skill and
    '## Helper Availability And Launch Paths' in pattern and
    'python3 -m observer_kit --help' in pattern and
-   'run_dashboard.py .runguard --port 8484' in pattern and
-   'watch_chat.py <run-id> --state-dir .runguard --follow' in pattern)
+   'run_dashboard.py .observer --port 8484' in pattern and
+   'watch_chat.py <run-id> --state-dir .observer --follow' in pattern)
 ok('cold-start setup installs and verifies a missing CLI',
    'Establish a verified CLI command prefix before project setup' in skill and
    'install the CLI from the public repository into a writable Python environment' in skill_words and
@@ -311,7 +311,8 @@ with tempfile.TemporaryDirectory(prefix='observer-skill-example-') as tmp:
          '--table', 'alpha', '--limit', '3', '--output', str(output), '--full-run'],
         env=env, capture_output=True, text=True, timeout=30)
     recovered_rows = [json.loads(line) for line in output.read_text(encoding='utf-8').splitlines()]
-    ledgers = list((root / 'state').glob('*.jsonl'))
+    state = root / 'state'
+    ledgers = list(state.glob('runs/*/events.jsonl')) + list(state.glob('*.jsonl'))
     ledger_text = '\n'.join(path.read_text(encoding='utf-8') for path in ledgers)
     ok('bundled example reconciles append-before-receipt recovery',
        recover.returncode == 0 and len(recovered_rows) == 3 and

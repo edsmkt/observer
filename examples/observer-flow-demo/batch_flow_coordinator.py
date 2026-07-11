@@ -40,7 +40,7 @@ TABLE = "websites"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Synthetic single + batch Observer Flow demo")
     parser.add_argument("--flow", default=str(HERE / "batch_pipeline.flow.json"))
-    parser.add_argument("--state-dir", default=str(HERE / ".runguard"))
+    parser.add_argument("--state-dir", default=str(HERE / ".observer"))
     parser.add_argument("--session", default="batch-flow-demo")
     parser.add_argument("--limit", type=int, default=24)
     parser.add_argument("--batch-size", type=int, default=6)

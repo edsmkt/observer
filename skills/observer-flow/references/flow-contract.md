@@ -112,7 +112,7 @@ with standard tooling. A manifest contains:
     "fields": ["website", "company_name"]
   },
   "state": {
-    "store": ".runguard/website-qualification.flow.sqlite3"
+    "store": ".observer/website-qualification.flow.sqlite3"
   },
   "nodes": [],
   "limits": {
@@ -242,7 +242,7 @@ The coordinator supplies one structured unit:
 
 ```json
 {
-  "run_id": "runguard:website-qualification.jsonl",
+  "run_id": "runguard:website-qualification",
   "plan_id": "sha256:...",
   "table": "websites",
   "row_key": "acme.example",

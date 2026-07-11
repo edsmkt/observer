@@ -130,8 +130,11 @@ print("Testing Observer dashboard in a real browser\n")
 with tempfile.TemporaryDirectory(prefix="observer-browser-") as tmp:
     state = Path(tmp)
     ledger = state / "browser-smoke.jsonl"
-    chat_file = state / "chat.jsonl"
-    control_file = state / "controls.jsonl"
+    # Side channels follow the lane name (strip legacy .jsonl from the run id).
+    lane_dir = state / "runs" / "browser-smoke"
+    lane_dir.mkdir(parents=True, exist_ok=True)
+    chat_file = lane_dir / "chat.jsonl"
+    control_file = lane_dir / "controls.jsonl"
     run_id = "runguard:browser-smoke.jsonl"
     append_event(ledger, {
         "ts": "2026-07-11T12:00:00Z",

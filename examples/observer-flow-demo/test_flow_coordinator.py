@@ -54,15 +54,17 @@ def command(script: Path, state: Path, session: str, mode: str, *extra: str):
 
 
 def events(state: Path) -> list[dict]:
-    # Side-channel files live next to the run ledger (chat, controls, write
-    # receipt registries). Only the continuous run lane is the event stream.
-    skip = {"chat.jsonl", "controls.jsonl"}
-    ledgers = [
-        path for path in state.glob("*.jsonl")
-        if path.name not in skip
-        and not path.name.endswith(".receipts.jsonl")
-        and ".receipt" not in path.name
-    ]
+    # Continuous lane ledgers live under runs/<lane>/events.jsonl. Legacy flat
+    # ledgers and side-channel files may still sit at the state-dir root.
+    ledgers = list(state.glob("runs/*/events.jsonl"))
+    if not ledgers:
+        skip = {"chat.jsonl", "controls.jsonl"}
+        ledgers = [
+            path for path in state.glob("*.jsonl")
+            if path.name not in skip
+            and not path.name.endswith(".receipts.jsonl")
+            and ".receipt" not in path.name
+        ]
     assert len(ledgers) == 1, ledgers
     return [json.loads(line) for line in ledgers[0].read_text(encoding="utf-8").splitlines()]
 

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Chat watcher that routes dashboard notes to the owning agent session.
 
-The dashboard writes every operator note into ONE shared `chat.jsonl`, each tagged
-with the `run` it's about. With several agent sessions open, an unscoped watcher would
-wake all of them on every note. This watcher only surfaces notes for ONE run, so the
-session that launched that run is the only one that acts on them.
+The dashboard writes operator notes into each lane's `runs/<lane>/chat.jsonl`
+(legacy root `chat.jsonl` is still read). With several agent sessions open, an
+unscoped watcher would wake all of them on every note. This watcher only surfaces
+notes for ONE run, so the session that launched that run is the only one that acts.
 
 Harness-agnostic: it just prints new user notes (as JSON lines) and exits — wire it
 into whatever your harness uses to wake an idle agent.
@@ -16,7 +16,8 @@ into whatever your harness uses to wake an idle agent.
     <state>/<run>.inbox.jsonl the moment the run starts.
 
 The run_id is what runguard.current_run_id(scope) returns, e.g.
-'runguard:2025-06-15-enrich.jsonl' — the same value the dashboard tags notes with.
+'runguard:2025-06-15-enrich' — the same value the dashboard tags notes with.
+Notes for that run live under ``runs/2025-06-15-enrich/chat.jsonl``.
 
 By default only notes that arrive AFTER the watcher starts are surfaced (pre-existing
 notes are marked seen); pass --include-existing to also emit ones already in the file.
@@ -185,7 +186,7 @@ def main():
     ap.add_argument('run_id', nargs='?', help="only notes for THIS run wake the watcher")
     ap.add_argument('--all', dest='all_runs', action='store_true',
                     help="bridge every run for one long-lived project session")
-    ap.add_argument('--state-dir', default=os.environ.get('RUNGUARD_STATE_DIR') or '.runguard')
+    ap.add_argument('--state-dir', default=os.environ.get('RUNGUARD_STATE_DIR') or '.observer')
     ap.add_argument('--poll', type=float, default=2.0)
     ap.add_argument('--follow', action='store_true', help="keep streaming instead of exiting on the first batch")
     ap.add_argument('--timeout', type=float, default=0, help="0 = wait forever")
@@ -206,11 +207,54 @@ def main():
         ap.error('--reply requires a run_id')
 
     a.state_dir = os.path.abspath(os.path.expanduser(a.state_dir))
-    chat_path = os.path.join(a.state_dir, 'chat.jsonl')
+
+    def _lane_name(run_id):
+        raw = str(run_id or '')
+        if ':' in raw:
+            raw = raw.split(':', 1)[1]
+        raw = os.path.basename(raw)
+        if raw.endswith('.jsonl'):
+            raw = raw[:-6]
+        return raw
+
+    def _chat_write_path(run_id):
+        lane = _lane_name(run_id)
+        if lane and run_id != 'all':
+            return os.path.join(a.state_dir, 'runs', lane, 'chat.jsonl')
+        return os.path.join(a.state_dir, 'chat.jsonl')
+
+    def _chat_read_paths():
+        paths = []
+        if a.all_runs:
+            root = os.path.join(a.state_dir, 'chat.jsonl')
+            paths.append(root)
+            runs_root = os.path.join(a.state_dir, 'runs')
+            if os.path.isdir(runs_root):
+                for name in sorted(os.listdir(runs_root)):
+                    paths.append(os.path.join(runs_root, name, 'chat.jsonl'))
+        else:
+            paths.append(_chat_write_path(a.run_id))
+            paths.append(os.path.join(a.state_dir, 'chat.jsonl'))
+        seen = set()
+        ordered = []
+        for path in paths:
+            key = os.path.abspath(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            ordered.append(path)
+        return ordered
+
+    def _load_all():
+        messages = []
+        for path in _chat_read_paths():
+            messages.extend(_load(path))
+        return messages
 
     # Reply mode: write one agent reply and exit (no poll).
     if a.reply:
-        os.makedirs(a.state_dir, exist_ok=True)
+        chat_path = _chat_write_path(a.run_id)
+        os.makedirs(os.path.dirname(chat_path) or a.state_dir, exist_ok=True)
         rec = {
             "ts": _timestamp(),
             "run": a.run_id,
@@ -230,7 +274,7 @@ def main():
     # Poll mode: watch for new user notes.
     seen = set()
     if not a.include_existing:                      # ignore notes left before we started
-        for m in _load(chat_path):
+        for m in _load_all():
             if _matches(m, a.run_id, a.all_runs):
                 seen.add(_sig(m))
     deadline = (time.time() + a.timeout) if a.timeout else None
@@ -240,7 +284,7 @@ def main():
             if a.parent_pid and not _pid_alive(a.parent_pid):
                 return 0
             fresh = []
-            for m in _load(chat_path):
+            for m in _load_all():
                 if _matches(m, a.run_id, a.all_runs):
                     s = _sig(m)
                     if s not in seen:

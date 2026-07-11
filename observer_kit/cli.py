@@ -73,7 +73,10 @@ def cmd_init(args: argparse.Namespace) -> int:
         messages.append(copy_file(skill_file("watch_chat.py"), project / "watch_chat.py", args.force))
     state_dir = (project / args.state_dir).resolve()
     state_dir.mkdir(parents=True, exist_ok=True)
+    runs_dir = state_dir / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
     messages.append(f"ready {state_dir}")
+    messages.append(f"ready {runs_dir}")
     if args.explain:
         messages.append(copy_file(skill_file("EXPLAIN.md"), state_dir / "EXPLAIN.md", args.force))
     if args.gitignore:
@@ -133,7 +136,25 @@ def cmd_test(args: argparse.Namespace) -> int:
     return 0
 
 
-def _chat_path(state_dir: Path) -> Path:
+def _lane_from_run_id(run_id: object) -> str:
+    raw = str(run_id or "").strip()
+    if not raw or raw == "all":
+        return ""
+    if ":" in raw:
+        raw = raw.split(":", 1)[1]
+    raw = Path(raw).name
+    if raw.endswith(".jsonl"):
+        raw = raw[:-6]
+    if not raw or raw in {".", ".."}:
+        return ""
+    return raw
+
+
+def _chat_path(state_dir: Path, run_id: object | None = None) -> Path:
+    """Per-lane chat file under runs/<lane>/; root for project-wide ``all``."""
+    lane = _lane_from_run_id(run_id)
+    if lane:
+        return state_dir / "runs" / lane / "chat.jsonl"
     return state_dir / "chat.jsonl"
 
 
@@ -211,7 +232,7 @@ def _append_agent_status(
     }
     if pid is not None:
         rec["pid"] = int(pid)
-    path = _chat_path(state_dir)
+    path = _chat_path(state_dir, run_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -230,22 +251,50 @@ def _chat_sig(message: dict) -> str:
     )
 
 
-def _load_chat_messages(state_dir: Path) -> list[dict]:
-    path = _chat_path(state_dir)
-    if not path.is_file():
-        return []
+def _chat_read_paths(state_dir: Path, run_id: object | None = None, *, all_runs: bool = False) -> list[Path]:
+    paths: list[Path] = []
+    if all_runs or not run_id:
+        paths.append(state_dir / "chat.jsonl")
+        runs_root = state_dir / "runs"
+        if runs_root.is_dir():
+            for child in sorted(runs_root.iterdir()):
+                if child.is_dir():
+                    paths.append(child / "chat.jsonl")
+    else:
+        paths.append(_chat_path(state_dir, run_id))
+        paths.append(state_dir / "chat.jsonl")
+    seen: set[Path] = set()
+    ordered: list[Path] = []
+    for path in paths:
+        key = path.resolve() if path.exists() else path
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(path)
+    return ordered
+
+
+def _load_chat_messages(
+    state_dir: Path,
+    run_id: object | None = None,
+    *,
+    all_runs: bool = False,
+) -> list[dict]:
     out: list[dict] = []
-    with path.open(encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(rec, dict):
-                out.append(rec)
+    for path in _chat_read_paths(state_dir, run_id, all_runs=all_runs):
+        if not path.is_file():
+            continue
+        with path.open(encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(rec, dict):
+                    out.append(rec)
     return out
 
 
@@ -337,7 +386,9 @@ def cmd_reply(args: argparse.Namespace) -> int:
         "text": text,
         "resolved": bool(args.resolved),
     }
-    with _chat_path(state_dir).open("a", encoding="utf-8") as fh:
+    path = _chat_path(state_dir, args.run)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
     try:
         _append_agent_status(state_dir, args.run, "idle")
@@ -393,7 +444,9 @@ def cmd_poll(args: argparse.Namespace) -> int:
             "text": text,
             "resolved": bool(args.resolved),
         }
-        with _chat_path(state_dir).open("a", encoding="utf-8") as fh:
+        path = _chat_path(state_dir, run_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
             fh.flush()
             try:
@@ -426,7 +479,7 @@ def cmd_poll(args: argparse.Namespace) -> int:
 
     seen = set()
     if not args.include_existing:
-        for message in _load_chat_messages(state_dir):
+        for message in _load_chat_messages(state_dir, run_id, all_runs=all_runs):
             if _wakes_agent(message, run_id, all_runs):
                 seen.add(_chat_sig(message))
 
@@ -442,7 +495,7 @@ def cmd_poll(args: argparse.Namespace) -> int:
     try:
         while True:
             fresh = []
-            for message in _load_chat_messages(state_dir):
+            for message in _load_chat_messages(state_dir, run_id, all_runs=all_runs):
                 if not _wakes_agent(message, run_id, all_runs):
                     continue
                 sig = _chat_sig(message)
@@ -763,10 +816,10 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
   observer-kit init .
-  observer-kit dashboard .runguard
-  observer-kit poll .runguard --run runguard:my-run.jsonl
-  observer-kit watch .runguard --all --follow
-  observer-kit run --state-dir .runguard -- python3 workflow.py --dry-run --limit 10
+  observer-kit dashboard .observer
+  observer-kit poll .observer --run runguard:my-run
+  observer-kit watch .observer --all --follow
+  observer-kit run --state-dir .observer -- python3 workflow.py --dry-run --limit 10
   observer-kit test
 """,
     )
@@ -781,12 +834,12 @@ def build_parser() -> argparse.ArgumentParser:
   observer-kit init ./my-project --force
 
 next:
-  observer-kit dashboard ./my-project/.runguard
-  observer-kit watch ./my-project/.runguard --all --follow
+  observer-kit dashboard ./my-project/.observer
+  observer-kit watch ./my-project/.observer --all --follow
 """,
     )
     init.add_argument("project", nargs="?", default=".", help="target project directory")
-    init.add_argument("--state-dir", default=".runguard", help="state directory inside the project")
+    init.add_argument("--state-dir", default=".observer", help="state directory inside the project")
     init.add_argument("--force", action="store_true", help="overwrite existing files")
     init.add_argument("--no-explain", dest="explain", action="store_false",
                       help="do not copy EXPLAIN.md into the state dir")
@@ -801,14 +854,14 @@ next:
         help="run the localhost dashboard",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
-  observer-kit dashboard .runguard
-  observer-kit dashboard ./my-project/.runguard --port 8485
+  observer-kit dashboard .observer
+  observer-kit dashboard ./my-project/.observer --port 8485
 
 For long-lived monitoring, keep this server running and launch pipelines in
 separate shells with observer-kit run --state-dir <same-dir> ...
 """,
     )
-    dash.add_argument("state_dir", nargs="?", default=".runguard", help="ledger/state directory")
+    dash.add_argument("state_dir", nargs="?", default=".observer", help="ledger/state directory")
     dash.add_argument("--port", type=int, default=8484, help="dashboard port")
     dash.set_defaults(func=cmd_dashboard)
 
@@ -818,10 +871,10 @@ separate shells with observer-kit run --state-dir <same-dir> ...
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
   # Preferred with a long-lived dashboard: bridge notes from any run.
-  observer-kit watch .runguard --all --follow
+  observer-kit watch .observer --all --follow
 
   # Scoped bridge for one run id.
-  observer-kit watch .runguard --run runguard:my-run.jsonl --follow
+  observer-kit watch .observer --run runguard:my-run --follow
 
 The watcher is transport only. It emits OBSERVER_CHAT_EVENT lines; the harness
 session remains responsible for inspecting data, editing scripts, rerunning,
@@ -832,8 +885,8 @@ reuses one watcher, different run IDs remain independent, and --all is the
 single-session project-wide mode.
 """,
     )
-    watch.add_argument("state_dir", nargs="?", default=".runguard", help="ledger/state directory")
-    watch.add_argument("--run", help="run id, e.g. runguard:my-run.jsonl")
+    watch.add_argument("state_dir", nargs="?", default=".observer", help="ledger/state directory")
+    watch.add_argument("--run", help="run id, e.g. runguard:my-run")
     watch.add_argument("--all", action="store_true", help="bridge dashboard chat for all runs")
     watch.add_argument("--poll", type=float, default=2.0, help="poll interval in seconds")
     watch.add_argument("--follow", action="store_true", help="keep streaming dashboard notes")
@@ -849,14 +902,14 @@ single-session project-wide mode.
         help="write an agent reply into dashboard chat",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""example:
-  observer-kit reply .runguard \\
-    --run runguard:my-run.jsonl \\
+  observer-kit reply .observer \\
+    --run runguard:my-run \\
     --anchor 'cell:companies::acme|companies::status' \\
     --resolved \\
     --text "Fixed the parser and reran the sample."
 """,
     )
-    reply.add_argument("state_dir", nargs="?", default=".runguard", help="ledger/state directory")
+    reply.add_argument("state_dir", nargs="?", default=".observer", help="ledger/state directory")
     reply.add_argument("--run", required=True, help="run id to reply to")
     reply.add_argument("--anchor", default="run", help="dashboard anchor/cell id")
     reply.add_argument("--resolved", action="store_true", help="mark the note resolved")
@@ -868,12 +921,12 @@ single-session project-wide mode.
         help="mark agent presence: listening, responding, or idle",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
-  observer-kit agent-status .runguard --run runguard:my-run.jsonl --listening
-  observer-kit agent-status .runguard --run runguard:my-run.jsonl --responding
-  observer-kit agent-status .runguard --run runguard:my-run.jsonl --idle
+  observer-kit agent-status .observer --run runguard:my-run --listening
+  observer-kit agent-status .observer --run runguard:my-run --responding
+  observer-kit agent-status .observer --run runguard:my-run --idle
 """,
     )
-    agent_status.add_argument("state_dir", nargs="?", default=".runguard",
+    agent_status.add_argument("state_dir", nargs="?", default=".observer",
                               help="ledger/state directory")
     agent_status.add_argument("--run", required=True, help="run id shown in the dashboard")
     mode = agent_status.add_mutually_exclusive_group(required=True)
@@ -891,14 +944,14 @@ single-session project-wide mode.
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
   # Leave running while the operator reviews the dashboard.
-  observer-kit poll .runguard --run runguard:scroll-demo.jsonl
+  observer-kit poll .observer --run runguard:scroll-demo
 
   # After acting, reply and listen again (Lavish --agent-reply pattern).
-  observer-kit poll .runguard --run runguard:scroll-demo.jsonl \\
+  observer-kit poll .observer --run runguard:scroll-demo \\
     --reply "Fixed the parser and reran the sample." --resolved
 
   # Project-wide bridge for one long-lived agent session.
-  observer-kit poll .runguard --all
+  observer-kit poll .observer --all
 
 Poll marks the run as listening so the dashboard shows agent presence. When a
 user note or control arrives it prints OBSERVER_CHAT_EVENT lines, flips to
@@ -906,9 +959,9 @@ responding, and exits (unless --follow). Re-run poll after you reply. Notes are
 never lost if the poll times out — re-run with --include-existing if needed.
 """,
     )
-    poll.add_argument("state_dir", nargs="?", default=".runguard",
+    poll.add_argument("state_dir", nargs="?", default=".observer",
                       help="ledger/state directory")
-    poll.add_argument("--run", help="run id, e.g. runguard:my-run.jsonl")
+    poll.add_argument("--run", help="run id, e.g. runguard:my-run")
     poll.add_argument("--all", action="store_true",
                       help="listen for notes on any run in this state dir")
     poll.add_argument("--poll", type=float, default=1.0,
@@ -932,24 +985,24 @@ never lost if the poll times out — re-run with --include-existing if needed.
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
   # Dry-run sample in the current source lane.
-  observer-kit run --state-dir .runguard -- python3 workflow.py --dry-run --limit 10
+  observer-kit run --state-dir .observer -- python3 workflow.py --dry-run --limit 10
 
   # Retry/fix/continue the same source data in the same dashboard run.
-  observer-kit run --state-dir .runguard --session july-import \\
+  observer-kit run --state-dir .observer --session july-import \\
     -- python3 workflow.py --full-run
 
   # Start a separate comparison or new batch run.
-  observer-kit run --state-dir .runguard --session auto \\
+  observer-kit run --state-dir .observer --session auto \\
     -- python3 workflow.py --full-run
 
   # Quick demo: launch a temporary dashboard with this command.
-  observer-kit run --state-dir .runguard --dashboard \\
+  observer-kit run --state-dir .observer --dashboard \\
     -- python3 workflow.py --dry-run --limit 10
 
 For persistent monitoring, prefer:
-  observer-kit dashboard .runguard
-  observer-kit watch .runguard --all --follow
-  observer-kit run --state-dir .runguard --session source-id -- ...
+  observer-kit dashboard .observer
+  observer-kit watch .observer --all --follow
+  observer-kit run --state-dir .observer --session source-id -- ...
 
 Session rule:
   same source retry/adaptation = reuse the same session or omit --session
@@ -957,7 +1010,7 @@ Session rule:
   clean comparison/new batch   = use --session auto or a new session name
 """,
     )
-    run.add_argument("--state-dir", default=".runguard", help="ledger/state directory")
+    run.add_argument("--state-dir", default=".observer", help="ledger/state directory")
     run.add_argument("--dashboard", action="store_true", help="start a dashboard for this run")
     run.add_argument("--port", type=int, default=8484, help="dashboard port")
     run.add_argument("--keep-dashboard", action="store_true",
@@ -995,7 +1048,7 @@ correctly.
 """,
     )
     doctor.add_argument("project", nargs="?", default=".", help="project directory")
-    doctor.add_argument("--state-dir", default=".runguard", help="state directory inside the project")
+    doctor.add_argument("--state-dir", default=".observer", help="state directory inside the project")
     doctor.set_defaults(func=cmd_doctor)
 
     return parser

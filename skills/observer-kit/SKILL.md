@@ -145,8 +145,8 @@ With the CLI helper, start the dashboard before the sample so rows arrive live:
 
 ```bash
 observer-kit init .
-observer-kit dashboard .runguard
-observer-kit run --state-dir .runguard -- python3 workflow.py --dry-run --limit 10
+observer-kit dashboard .observer
+observer-kit run --state-dir .observer -- python3 workflow.py --dry-run --limit 10
 ```
 
 Run the static emission/durability check from the skill directory:
@@ -203,14 +203,14 @@ Keep one dashboard server attached to the state directory. By default,
 stay independent. Choose one all-run watcher for a single long-lived project session:
 
 ```bash
-observer-kit watch .runguard --all --follow
-observer-kit run --state-dir .runguard -- python3 workflow.py --full-run
+observer-kit watch .observer --all --follow
+observer-kit run --state-dir .observer -- python3 workflow.py --full-run
 ```
 
 For interactive dashboard chat, use the AXI-style poll loop so the UI shows
 **listening** while you wait (`poll` → note → `reply` → `poll` again). Watcher
 ownership refuses overlapping bridges; parent-owned watchers exit with their CLI
-process. Use `observer-kit watch .runguard --status` for inspection.
+process. Use `observer-kit watch .observer --status` for inspection.
 
 Treat watcher/poll output as transport into the current agent session. Inspect
 the script, JSONL, durable sink, and destination before replying or changing the run.

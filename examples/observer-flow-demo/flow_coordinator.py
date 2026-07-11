@@ -30,7 +30,7 @@ from synthetic_data import build_rows
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Live synthetic Observer Flow demo")
     parser.add_argument("--flow", default=str(HERE / "pipeline.flow.json"))
-    parser.add_argument("--state-dir", default=str(HERE / ".runguard"))
+    parser.add_argument("--state-dir", default=str(HERE / ".observer"))
     parser.add_argument("--session", default="live-flow-demo")
     parser.add_argument("--limit", type=int, default=30)
     parser.add_argument("--delay", type=float, default=0.35)
