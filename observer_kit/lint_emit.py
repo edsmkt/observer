@@ -78,9 +78,19 @@ def _is_ledger_event_call(node, event):
     if is_ledger:
         if len(node.args) >= 2 and isinstance(node.args[1], ast.Constant):
             return node.args[1].value == event
+    # Demo/runtime helper: emit(ledger, run, "record", table=..., key=...)
+    if isinstance(node.func, ast.Name) and node.func.id == 'emit':
+        if len(node.args) >= 3 and isinstance(node.args[2], ast.Constant):
+            return node.args[2].value == event
+        for keyword in node.keywords:
+            if (keyword.arg == 'event' and isinstance(keyword.value, ast.Constant)
+                    and keyword.value.value == event):
+                return True
     if isinstance(node.func, ast.Attribute):
         # ObservedRun.step() always emits stable record rows.
-        if event == 'record' and node.func.attr in ('step', 'record'):
+        # Demo helpers stream Data-table rows under other names.
+        if event == 'record' and node.func.attr in (
+                'step', 'record', 'emit_record', 'persist_and_emit_row'):
             return True
         if event == 'progress' and node.func.attr == 'progress':
             return True

@@ -12,9 +12,14 @@ from pathlib import Path
 
 
 passed = failed = 0
-HERE = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path(__file__).resolve().parent
-VALIDATOR = HERE / "scripts" / "validate_flow.py"
-EXAMPLE = HERE / "examples" / "website-qualification.flow.json"
+# Optional argv: path to observer-flow skill (for example manifests). Product
+# validator lives in the installable package after the package/skill split.
+REPO = Path(__file__).resolve().parents[1]
+SKILL = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else (
+    REPO / ".claude" / "skills" / "observer-flow"
+)
+VALIDATOR = REPO / "observer_kit" / "validate_flow.py"
+EXAMPLE = SKILL / "examples" / "website-qualification.flow.json"
 
 
 def ok(name: str, condition: bool, detail: str = "") -> None:
@@ -222,11 +227,7 @@ with tempfile.TemporaryDirectory() as tmp:
        proc.stdout + proc.stderr)
 
 # Shipped demo manifests must pass the same structural gate as skill examples.
-# Skill lives at .claude/skills/observer-flow (or legacy skills/observer-flow).
-if HERE.parent.name == "skills" and HERE.parents[1].name == ".claude":
-    demo_root = HERE.parents[2] / "examples" / "observer-flow-demo"
-else:
-    demo_root = HERE.parents[1] / "examples" / "observer-flow-demo"
+demo_root = REPO / "examples" / "observer-flow-demo"
 for name in ("pipeline.flow.json", "batch_pipeline.flow.json"):
     path = demo_root / name
     if not path.is_file():

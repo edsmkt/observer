@@ -180,15 +180,16 @@ process; the script pauses at a checkpoint where it has recorded its progress.
 ## Install
 
 The repository ships one installable Python package, two agent skills, and a
-CLI. **Product runtime** (runguard, dashboard, chat watch, lint) lives in the
-`observer_kit` package. The Observer Kit skill is the execution **playbook**;
-the Observer Flow skill is the graph-design playbook. Neither skill tree is the
-canonical home for product `.py` implementation.
+CLI. **Product runtime** (runguard, dashboard, chat watch, lint, flow
+validator) lives in the `observer_kit` package. The Observer Kit skill is the
+execution **playbook**; the Observer Flow skill is the graph-design playbook.
+Neither skill tree is the canonical home for product `.py` implementation.
 
 Install the package/CLI first. During agent-led setup, the skills probe for the
 CLI, install it in a writable Python environment when needed, and verify it
 before initializing the project. Skill trees ship playbook markdown only (no
-product runtime Python), matching a package-vs-skill split.
+product runtime Python); use `observer-kit validate-flow` for graph structure
+checks.
 
 The CLI keeps the established `observer-kit` command so existing projects and
 install instructions continue to work.
@@ -363,6 +364,7 @@ observer-kit reply .observer --run runguard:my-run --anchor run --text "I fixed 
 observer-kit ps .observer                                 # list dashboards/watchers
 observer-kit stop --orphans                               # dead-parent processes
 observer-kit stop --sweep .observer                       # end-of-session cleanup
+observer-kit validate-flow pipeline.flow.json             # Flow graph structure
 observer-kit doctor [project]
 observer-kit test
 ```

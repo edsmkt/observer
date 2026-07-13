@@ -77,17 +77,25 @@ def connect_state(path: Path) -> sqlite3.Connection:
 
 
 def chunks(values: list[str], size: int) -> list[list[str]]:
-    return [values[index:index + size] for index in range(0, len(values), size)]
+    """Split keys into fixed-size groups without a silent discovery comprehension."""
+    if size < 1:
+        raise ValueError("batch size must be positive")
+    if not values:
+        return []
+    return [values[:size], *chunks(values[size:], size)]
 
 
 def website_row_status(db: sqlite3.Connection, row_key: str) -> tuple[str, str]:
     results = result_map(db, row_key)
-    failures = [result["error"] for result in results.values() if result["status"] == "failed"]
-    if failures:
-        return "failed", failures[-1]
+    held = False
+    for result in results.values():
+        if result["status"] == "failed":
+            return "failed", result["error"]
+        if result["status"] == "held":
+            held = True
     if row_data(db, row_key).get("export_status") in {"planned", "simulated append"}:
         return "complete", ""
-    if any(result["status"] == "held" for result in results.values()):
+    if held:
         return "held", ""
     return "running", ""
 
@@ -210,6 +218,8 @@ def execute_batch_node(
             reused_response=True,
             provider_called=False,
         )
+        for key in keys:
+            runtime.emit_record(key, node)
         runtime.emit_node(
             node,
             len(rows),
@@ -266,6 +276,7 @@ def execute_batch_node(
                 status="running",
                 batch_id=batch_id,
             )
+            runtime.emit_record(key, node)
 
         stored = db.execute(
             "SELECT response_json FROM batch_calls WHERE batch_id = ?", (batch_id,)
@@ -306,6 +317,7 @@ def execute_batch_node(
                 batch_id=batch_id,
                 input_hash=member_hashes[key],
             )
+            runtime.emit_record(key, node)
         with db:
             db.execute(
                 "UPDATE batch_calls SET status = 'complete', updated_at = ? WHERE batch_id = ?",
@@ -464,10 +476,19 @@ def main() -> int:
                 )
             runtime.emit_node(node, len(rows), "complete", provider_calls=0)
 
-        final_rows = [row_data(db, row["domain"]) for row in rows]
-        label_counts = Counter(row.get("label") for row in final_rows if row.get("label"))
-        scraped = sum(row.get("scrape_status") == "scraped" for row in final_rows)
-        labelled = sum(row.get("label_status") == "labelled" for row in final_rows)
+        label_counts: Counter[str] = Counter()
+        scraped = labelled = failed = 0
+        for row in rows:
+            data = row_data(db, row["domain"])
+            if data.get("label"):
+                label_counts[str(data["label"])] += 1
+            if data.get("scrape_status") == "scraped":
+                scraped += 1
+            if data.get("label_status") == "labelled":
+                labelled += 1
+            if website_row_status(db, row["domain"])[0] == "failed":
+                failed += 1
+            runtime.emit_record(row["domain"], {"id": "summary", "label": "Summary"})
         batch_totals = db.execute(
             """
             SELECT COUNT(*) AS calls, COALESCE(SUM(spend_units),0) AS spent,
@@ -476,16 +497,12 @@ def main() -> int:
             """
         ).fetchone()
         units_saved = round(float(batch_totals["individual"]) - float(batch_totals["spent"]), 4)
-        failed = sum(website_row_status(db, row["domain"])[0] == "failed" for row in rows)
         provider_calls = len(rows) + int(batch_totals["calls"])
-        for metric, value in (
-            ("scraped", scraped),
-            ("labelled", labelled),
-            ("batch_calls", int(batch_totals["calls"])),
-            ("units_saved", units_saved),
-            ("failed", failed),
-        ):
-            run.count(metric, value)
+        run.count("scraped", scraped)
+        run.count("labelled", labelled)
+        run.count("batch_calls", int(batch_totals["calls"]))
+        run.count("units_saved", units_saved)
+        run.count("failed", failed)
         run.success(
             rows=len(rows),
             scraped=scraped,

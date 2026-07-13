@@ -201,6 +201,16 @@ def cmd_lint(args: argparse.Namespace) -> int:
     return subprocess.call([sys.executable, "-B", str(lint), str(script)])
 
 
+def cmd_validate_flow(args: argparse.Namespace) -> int:
+    """Validate an Observer Flow JSON manifest (structural)."""
+    from observer_kit.validate_flow import main as validate_main
+
+    argv = [args.manifest]
+    if args.json:
+        argv.append("--json")
+    return int(validate_main(argv))
+
+
 def _lane_from_run_id(run_id: object) -> str:
     raw = str(run_id or "").strip()
     if not raw or raw == "all":
@@ -1287,6 +1297,7 @@ def build_parser() -> argparse.ArgumentParser:
   observer-kit run --state-dir .observer -- python3 workflow.py --dry-run --limit 10
   observer-kit ps .observer
   observer-kit stop --sweep .observer
+  observer-kit validate-flow pipeline.flow.json
   observer-kit test
 """,
     )
@@ -1328,6 +1339,21 @@ next:
     )
     lint.add_argument("script", help="workflow script path")
     lint.set_defaults(func=cmd_lint)
+
+    validate_flow = sub.add_parser(
+        "validate-flow",
+        help="validate an Observer Flow JSON manifest (structure + plan hash)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""examples:
+  observer-kit validate-flow pipeline.flow.json
+  observer-kit validate-flow pipeline.flow.json --json
+""",
+    )
+    validate_flow.add_argument("manifest", help="path to pipeline.flow.json")
+    validate_flow.add_argument(
+        "--json", action="store_true", help="machine-readable output",
+    )
+    validate_flow.set_defaults(func=cmd_validate_flow)
 
     dash = sub.add_parser(
         "dashboard",

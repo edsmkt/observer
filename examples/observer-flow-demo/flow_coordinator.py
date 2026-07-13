@@ -43,16 +43,19 @@ def parse_args() -> argparse.Namespace:
 
 def account_row_status(db: sqlite3.Connection, row_key: str) -> tuple[str, str]:
     results = result_map(db, row_key)
-    failures = [result["error"] for result in results.values() if result["status"] == "failed"]
-    if failures:
-        return "failed", failures[-1]
+    held = False
+    for result in results.values():
+        if result["status"] == "failed":
+            return "failed", result["error"]
+        if result["status"] == "held":
+            held = True
     data = row_data(db, row_key)
     # Successfully triaged review rows are complete work, not blocked holds.
     if data.get("review_status") == "queued":
         return "complete", ""
     if data.get("sheet_status") or data.get("routing_status"):
         return "complete", ""
-    if any(result["status"] == "held" for result in results.values()):
+    if held:
         return "held", ""
     return "running", ""
 
@@ -137,15 +140,23 @@ def main() -> int:
                 runtime.emit_node(node, len(rows), "running")
             runtime.emit_node(node, len(rows), "complete")
 
-        final_rows = [row_data(db, row["domain"]) for row in rows]
-        outcomes = {
-            "qualified": sum(row.get("qualification") == "qualified" for row in final_rows),
-            "review": sum(row.get("qualification") == "review" for row in final_rows),
-            "out_of_scope": sum(row.get("qualification") == "not_software" for row in final_rows),
-            "failed": sum(account_row_status(db, row["domain"])[0] == "failed" for row in rows),
-        }
-        for metric, value in outcomes.items():
-            run.count(metric, value)
+        qualified = review = out_of_scope = failed = 0
+        for row in rows:
+            data = row_data(db, row["domain"])
+            if data.get("qualification") == "qualified":
+                qualified += 1
+            elif data.get("qualification") == "review":
+                review += 1
+            elif data.get("qualification") == "not_software":
+                out_of_scope += 1
+            if account_row_status(db, row["domain"])[0] == "failed":
+                failed += 1
+            # Terminal summary still advances the same Data-table keys.
+            runtime.emit_record(row["domain"], {"id": "summary", "label": "Summary"})
+        run.count("qualified", qualified)
+        run.count("review", review)
+        run.count("out_of_scope", out_of_scope)
+        run.count("failed", failed)
         spend_total = db.execute(
             "SELECT COALESCE(SUM(spend_units),0) AS total FROM node_results"
         ).fetchone()["total"]

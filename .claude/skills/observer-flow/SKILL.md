@@ -100,10 +100,10 @@ with the node's `updates` list. Represent intentional merges with an explicit
 merge node. Give expanded child rows deterministic keys derived from their
 parent and source child identity.
 
-Validate structure from this skill directory with:
+Validate structure with the package CLI:
 
 ```bash
-python3 scripts/validate_flow.py pipeline.flow.json
+observer-kit validate-flow pipeline.flow.json
 ```
 
 Build a plan ID from the canonical manifest, node script and config hashes,
@@ -240,8 +240,8 @@ work, current-lane fields evolve in place, and comparison work has its own view.
   and scheduler contract; read in full for every build or adaptation.
 - [`examples/website-qualification.flow.json`](examples/website-qualification.flow.json):
   generic map, condition, enrichment, and destination example.
-- [`scripts/validate_flow.py`](scripts/validate_flow.py): structural graph
-  validator; run after each manifest change.
+- Package CLI `observer-kit validate-flow`: structural graph validator; run
+  after each manifest change.
 - [`references/cookbook-contract.md`](references/cookbook-contract.md): agent
   contract for creating the user's reusable nodes, subflows, and adapters.
 - [`../observer-kit/SKILL.md`](../observer-kit/SKILL.md): execution workflow and
