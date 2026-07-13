@@ -1,0 +1,4 @@
+# Trusted pipeline commands for Observer Kit (used by no-mistakes gate).
+commands:
+  test: "PYTHONPATH=. python3 -m observer_kit test"
+  lint: "PYTHONPATH=. python3 -m observer_kit lint examples/example_worker.py && PYTHONPATH=. python3 -m observer_kit lint examples/observer-flow-demo/flow_coordinator.py && PYTHONPATH=. python3 -m observer_kit lint examples/observer-flow-demo/batch_flow_coordinator.py"
