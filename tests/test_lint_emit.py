@@ -556,6 +556,224 @@ def main():
 ok("multi-source listcomp silent discovery is flagged",
    rc == 1 and 'ROW LIVENESS MISSING' in out, f"rc={rc}; {out[:280]}")
 
+# 18o. Nested helper + free-global buffer (results not a parameter).
+rc, out, err = run_lint("""
+from runguard import ledger
+results = []
+def collect(buf, row):
+    buf.append(row)
+def build(item):
+    collect(results, item)
+def main():
+    for page in source_pages:
+        for row in fetch_page(page):
+            build(row)
+    for row in results:
+        ledger('scope', 'record', table='companies', key=row['id'],
+               destination='planned')
+""")
+ok("nested helper free-global buffer silent discovery is flagged",
+   rc == 1 and 'ROW LIVENESS MISSING' in out, f"rc={rc}; {out[:280]}")
+
+# 18p. ThreadPoolExecutor.map silent accumulation then terminal dump.
+rc, out, err = run_lint("""
+from concurrent.futures import ThreadPoolExecutor
+from runguard import ledger
+results = []
+def worker(item):
+    results.append(item)
+def main():
+    with ThreadPoolExecutor() as ex:
+        list(ex.map(worker, source_items))
+    for row in results:
+        ledger('scope', 'record', table='companies', key=row['id'],
+               destination='planned')
+""")
+ok("thread-pool map silent discovery is flagged",
+   rc == 1 and 'ROW LIVENESS MISSING' in out, f"rc={rc}; {out[:280]}")
+
+# 18q. Bound-method alias add = results.append; add(row).
+rc, out, err = run_lint("""
+from runguard import ledger
+def build():
+    results = []
+    add = results.append
+    for page in source_pages:
+        for row in fetch_page(page):
+            add(row)
+    return results
+def main():
+    for row in build():
+        ledger('scope', 'record', table='companies', key=row['id'],
+               destination='planned')
+""")
+ok("bound-method append alias silent discovery is flagged",
+   rc == 1 and 'ROW LIVENESS MISSING' in out, f"rc={rc}; {out[:280]}")
+
+# 18r. Multi-source listcomp builder + module-level terminal flush.
+rc, out, err = run_lint("""
+from runguard import ledger
+def build():
+    return [row for page in source_pages for row in fetch_page(page)]
+rows = build()
+for row in rows:
+    ledger('scope', 'record', table='companies', key=row['id'],
+           destination='planned')
+""")
+ok("listcomp with module-level flush silent discovery is flagged",
+   rc == 1 and 'ROW LIVENESS MISSING' in out, f"rc={rc}; {out[:280]}")
+
+# 18s. functools.reduce fold then terminal dump.
+rc, out, err = run_lint("""
+from functools import reduce
+from runguard import ledger
+def add_page(acc, page):
+    acc.extend(fetch_page(page))
+    return acc
+def main():
+    results = reduce(add_page, source_pages, [])
+    for row in results:
+        ledger('scope', 'record', table='companies', key=row['id'],
+               destination='planned')
+""")
+ok("reduce fold silent discovery is flagged",
+   rc == 1 and 'ROW LIVENESS MISSING' in out, f"rc={rc}; {out[:280]}")
+
+# 18t. chain.from_iterable materialize then terminal dump.
+rc, out, err = run_lint("""
+from itertools import chain
+from runguard import ledger
+def main():
+    results = list(chain.from_iterable(fetch_page(p) for p in source_pages))
+    for row in results:
+        ledger('scope', 'record', table='companies', key=row['id'],
+               destination='planned')
+""")
+ok("chain.from_iterable silent discovery is flagged",
+   rc == 1 and 'ROW LIVENESS MISSING' in out, f"rc={rc}; {out[:280]}")
+
+# 18u. Single-generator map-comp over source_items then dump.
+rc, out, err = run_lint("""
+from runguard import ledger
+def build():
+    return [transform(row) for row in source_items]
+def main():
+    for row in build():
+        ledger('scope', 'record', table='companies', key=row['id'],
+               destination='planned')
+""")
+ok("single-gen source map-comp silent discovery is flagged",
+   rc == 1 and 'ROW LIVENESS MISSING' in out, f"rc={rc}; {out[:280]}")
+
+# 18v. list(map(...)) materialize then terminal dump.
+rc, out, err = run_lint("""
+from runguard import ledger
+def transform(row):
+    return row
+def main():
+    results = list(map(transform, source_items))
+    for row in results:
+        ledger('scope', 'record', table='companies', key=row['id'],
+               destination='planned')
+""")
+ok("list(map) materialize silent discovery is flagged",
+   rc == 1 and 'ROW LIVENESS MISSING' in out, f"rc={rc}; {out[:280]}")
+
+# 18w. list(starmap(...)) materialize then terminal dump.
+rc, out, err = run_lint("""
+from itertools import starmap
+from runguard import ledger
+def transform(a, b):
+    return {'id': a, 'v': b}
+def main():
+    results = list(starmap(transform, source_pairs))
+    for row in results:
+        ledger('scope', 'record', table='companies', key=row['id'],
+               destination='planned')
+""")
+ok("list(starmap) materialize silent discovery is flagged",
+   rc == 1 and 'ROW LIVENESS MISSING' in out, f"rc={rc}; {out[:280]}")
+
+# 18x. list(genexp) materialize then terminal dump.
+rc, out, err = run_lint("""
+from runguard import ledger
+def worker(x):
+    return x
+def main():
+    results = list(worker(x) for x in source_items)
+    for row in results:
+        ledger('scope', 'record', table='companies', key=row['id'],
+               destination='planned')
+""")
+ok("list(genexp) materialize silent discovery is flagged",
+   rc == 1 and 'ROW LIVENESS MISSING' in out, f"rc={rc}; {out[:280]}")
+
+# 18y. [*map(...)] starred list materialize then dump.
+rc, out, err = run_lint("""
+from runguard import ledger
+def worker(x):
+    return x
+def main():
+    results = [*map(worker, source_items)]
+    for row in results:
+        ledger('scope', 'record', table='companies', key=row['id'],
+               destination='planned')
+""")
+ok("starred-map list materialize silent discovery is flagged",
+   rc == 1 and 'ROW LIVENESS MISSING' in out, f"rc={rc}; {out[:280]}")
+
+# 18z. dict(genexp) materialize then terminal dump.
+rc, out, err = run_lint("""
+from runguard import ledger
+def main():
+    results = dict((row['id'], row) for page in source_pages
+                   for row in fetch_page(page))
+    for key, row in results.items():
+        ledger('scope', 'record', table='companies', key=key,
+               destination='planned')
+""")
+ok("dict(genexp) materialize silent discovery is flagged",
+   rc == 1 and 'ROW LIVENESS MISSING' in out, f"rc={rc}; {out[:280]}")
+
+# 18aa. Helper returns list(genexp) then caller dumps.
+rc, out, err = run_lint("""
+from runguard import ledger
+def worker(x):
+    return x
+def build():
+    return list(worker(x) for x in source_items)
+def main():
+    for row in build():
+        ledger('scope', 'record', table='companies', key=row['id'],
+               destination='planned')
+""")
+ok("helper-returned list(genexp) silent discovery is flagged",
+   rc == 1 and 'ROW LIVENESS MISSING' in out, f"rc={rc}; {out[:280]}")
+
+# 18ab. list(source_items) bare-name materialize then dump.
+rc, out, err = run_lint("""
+from runguard import ledger
+def main():
+    results = list(source_items)
+    for row in results:
+        ledger('scope', 'record', table='companies', key=row['id'],
+               destination='planned')
+""")
+ok("list(source_items) materialize silent discovery is flagged",
+   rc == 1 and 'ROW LIVENESS MISSING' in out, f"rc={rc}; {out[:280]}")
+
+# 18ac. list(fetch_all()) source-fetch materialize then dump.
+rc, out, err = run_lint("""
+from runguard import ledger
+def main():
+    results = list(fetch_all())
+    for row in results:
+        ledger('scope', 'record', table='companies', key=row['id'],
+               destination='planned')
+""")
+ok("list(fetch_all) materialize silent discovery is flagged",
+   rc == 1 and 'ROW LIVENESS MISSING' in out, f"rc={rc}; {out[:280]}")
+
 # 19. Qualified ledger calls pass when progress and stable rows advance together.
 rc, out, err = run_lint("""
 import runguard

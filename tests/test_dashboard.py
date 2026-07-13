@@ -404,6 +404,20 @@ with tempfile.TemporaryDirectory(prefix='rgdash-last-') as last_state:
     ok("oversized terminal event clears the live indicator",
        dashboard._is_live_run(last_path, os.path.getmtime(last_path), time.time()) is False)
 
+# SIGKILL leaves no terminal event but the scope lock holds a dead PID.
+with tempfile.TemporaryDirectory(prefix='rgdash-deadlock-') as dead_state:
+    runs_dir = os.path.join(dead_state, 'runs', 'sigkill-lane')
+    os.makedirs(runs_dir, exist_ok=True)
+    ev_path = os.path.join(runs_dir, 'events.jsonl')
+    with open(ev_path, 'w', encoding='utf-8') as fh:
+        fh.write(json.dumps({'event': 'run_started', 'description': 'killed'}) + '\n')
+        fh.write(json.dumps({'event': 'record', 'table': 't', 'key': '1'}) + '\n')
+    with open(os.path.join(dead_state, 'sigkill-lane.lock'), 'w', encoding='utf-8') as fh:
+        json.dump({'pid': 999999999, 'started': '2020-01-01T00:00:00Z',
+                   'scope': 'sigkill-lane'}, fh)
+    ok("dead lock holder is not marked live without a terminal event",
+       dashboard._is_live_run(ev_path, time.time(), time.time()) is False)
+
 # Partial trailing bytes alone must not keep the client in a 0ms catch-up loop.
 with tempfile.TemporaryDirectory(prefix='rgdash-more-') as more_state:
     more_path = os.path.join(more_state, 'tail.jsonl')

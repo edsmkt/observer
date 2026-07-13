@@ -398,96 +398,331 @@ def _looks_like_counter_rebind(value, name):
     return False
 
 
-def _loop_produces_entities(loop, functions=None):
-    """True when a loop accumulates business entities (not mere counters).
+_COUNTER_NAMES = frozenset({'progress', 'metrics', 'counts', 'counters', 'stats'})
+_PARALLEL_MAP_ATTRS = frozenset({'map', 'imap', 'imap_unordered'})
 
-    Detects subscript writes, collection mutations, self-merge rebinds,
-    ``buf += [...]`` / ``buf += chunk``, and helper calls that mutate a
-    bound buffer parameter (so silent discovery cannot hide behind
-    ``collect(companies, row)``).
-    """
-    counter_names = {'progress', 'metrics', 'counts', 'counters', 'stats'}
-    functions = functions if functions is not None else {}
-    for node in _body_nodes(loop):
-        if isinstance(node, (ast.Yield, ast.YieldFrom)):
+
+def _collection_method_aliases(tree):
+    """Names bound to collection mutators: ``add = results.append``."""
+    aliases = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        value = node.value
+        if not (isinstance(value, ast.Attribute)
+                and value.attr in COLLECTION_MUTATIONS):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                aliases.add(target.id)
+    return aliases
+
+
+def _node_produces_entities(node, functions, method_aliases=None, seen=None):
+    """True when a single statement accumulates business entities."""
+    counter_names = _COUNTER_NAMES
+    method_aliases = method_aliases or set()
+    seen = set(seen or ())
+    if isinstance(node, (ast.Yield, ast.YieldFrom)):
+        return True
+    if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        if any(isinstance(target, ast.Subscript) for target in targets):
             return True
-        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            if any(isinstance(target, ast.Subscript) for target in targets):
+        # found = found + [...] / t = {**t, **chunk} — self-merging rebinds.
+        if isinstance(node, ast.Assign) and node.value is not None:
+            for target in targets:
+                if not isinstance(target, ast.Name):
+                    continue
+                if target.id in counter_names:
+                    continue
+                if _looks_like_counter_rebind(node.value, target.id):
+                    continue
+                if _name_referenced_in(node.value, target.id):
+                    return True
+        # targets += [row] / targets += chunk — AugAssign accumulation.
+        if isinstance(node, ast.AugAssign) and isinstance(node.op, ast.Add):
+            target = node.target
+            if isinstance(target, ast.Name) and target.id not in counter_names:
+                if isinstance(node.value, ast.Constant) and isinstance(
+                        node.value.value, (int, float)):
+                    pass  # n += 1 counter
+                else:
+                    return True
+            if isinstance(target, (ast.Attribute, ast.Subscript)):
+                roots = _root_names(target)
+                if roots and not roots <= counter_names:
+                    return True
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr in COLLECTION_MUTATIONS):
+        roots = _root_names(node.func.value)
+        if roots and not roots <= counter_names:
+            return True
+    # Bound-method alias: add = results.append; add(item)
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id in method_aliases):
+        return True
+    # Helper-mediated accumulation (params, free globals, nested helpers).
+    if isinstance(node, ast.Call) and functions:
+        helper = functions.get(_called_name(node))
+        if helper:
+            bindings = _call_bindings(node, helper)
+            for parameter in _mutated_parameters(helper, functions):
+                roots = bindings.get(parameter, set())
+                if roots and not roots <= counter_names:
+                    return True
+            if _function_produces_entities(helper, functions, method_aliases, seen):
                 return True
-            # found = found + [...] / t = {**t, **chunk} — self-merging rebinds.
-            if isinstance(node, ast.Assign) and node.value is not None:
-                for target in targets:
-                    if not isinstance(target, ast.Name):
-                        continue
-                    if target.id in counter_names:
-                        continue
-                    if _looks_like_counter_rebind(node.value, target.id):
-                        continue
-                    if _name_referenced_in(node.value, target.id):
-                        return True
-            # targets += [row] / targets += chunk — AugAssign accumulation.
-            if isinstance(node, ast.AugAssign) and isinstance(node.op, (ast.Add,)):
-                target = node.target
-                if isinstance(target, ast.Name) and target.id not in counter_names:
-                    if not _looks_like_counter_rebind(
-                            ast.BinOp(left=ast.Name(id=target.id, ctx=ast.Load()),
-                                      op=node.op, right=node.value),
-                            target.id):
-                        # Counter-style ``n += 1`` only; list/dict/chunk grows entities.
-                        if isinstance(node.value, ast.Constant) and isinstance(
-                                node.value.value, (int, float)):
-                            continue
-                        return True
-                if isinstance(target, (ast.Attribute, ast.Subscript)):
-                    roots = _root_names(target)
-                    if roots and not roots <= counter_names:
-                        return True
-        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr in COLLECTION_MUTATIONS):
-            roots = _root_names(node.func.value)
-            if roots and not roots <= counter_names:
-                return True
-        # Helper-mediated accumulation: collect(buf, row) where helper mutates buf.
-        if isinstance(node, ast.Call) and functions:
-            called = _called_name(node)
-            helper = functions.get(called)
-            if helper:
-                bindings = _call_bindings(node, helper)
-                for parameter in _mutated_parameters(helper, functions):
-                    roots = bindings.get(parameter, set())
-                    if roots and not roots <= counter_names:
-                        return True
-        # Nested list/set/dict/generator comprehensions that build collections
-        # inside a discovery loop (or as the whole body of a synthetic walk).
-        if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+    if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+        return True
+    return False
+
+
+def _function_produces_entities(fn, functions, method_aliases=None, seen=None):
+    """True when a helper accumulates entities (including free-name buffers)."""
+    seen = set(seen or ())
+    if fn.name in seen:
+        return False
+    seen.add(fn.name)
+    method_aliases = method_aliases if method_aliases is not None else set()
+    for node in _body_nodes(fn):
+        if _node_produces_entities(node, functions, method_aliases, seen):
             return True
     return False
 
 
-def _is_multi_source_comprehension(value):
-    """Multi-generator comps are the usual silent full-scan discovery shape."""
-    if isinstance(value, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
-        return len(value.generators) >= 2
-    if isinstance(value, ast.DictComp):
-        return len(value.generators) >= 2
+def _loop_produces_entities(loop, functions=None, method_aliases=None):
+    """True when a loop accumulates business entities (not mere counters).
+
+    Detects subscript writes, collection mutations, self-merge rebinds,
+    ``buf += [...]`` / ``buf += chunk``, bound-method aliases
+    (``add = buf.append``), helper param mutations, free-global buffers
+    mutated through nested helpers, and nested multi-source comps.
+    """
+    functions = functions if functions is not None else {}
+    method_aliases = method_aliases if method_aliases is not None else set()
+    for node in _body_nodes(loop):
+        if _node_produces_entities(node, functions, method_aliases):
+            return True
+    return False
+
+
+def _looks_like_source_iter_name(name):
+    lower = str(name or '').lower()
+    return any(token in lower for token in (
+        'source', 'page', 'item', 'row', 'batch', 'input', 'lead', 'record',
+        'result', 'company', 'data', 'feed', 'cursor', 'query',
+    ))
+
+
+def _comprehension_is_discovery(value):
+    """True for comps that fully scan a source before any record can stream.
+
+    Multi-generator comps always count. Single-generator comps count when the
+    iterator is a call (``fetch_page(...)``) or a source-like name
+    (``source_items``), which agents use for silent map-then-dump shapes.
+    """
+    if isinstance(value, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+        gens = value.generators
+    else:
+        return False
+    if len(gens) >= 2:
+        return True
+    for gen in gens:
+        it = gen.iter
+        if isinstance(it, ast.Call):
+            return True
+        if isinstance(it, ast.Name) and _looks_like_source_iter_name(it.id):
+            return True
+        if isinstance(it, ast.Attribute) and _looks_like_source_iter_name(it.attr):
+            return True
     return False
 
 
 def _function_comprehension_discovery(fn):
-    """True when a helper builds a multi-source collection via comprehension.
+    """True when a helper builds a collection via discovery-shaped comprehension.
 
-    Agents often write ``return [row for page in pages for row in page]`` with
-    no explicit For loop; the terminal dump then leaves the Data table empty
-    during discovery. Single-generator comps (map-like transforms) stay quiet.
+    Agents often write ``return [row for page in pages for row in page]``,
+    ``return [transform(r) for r in source_items]``, or
+    ``return list(worker(x) for x in source_items)`` with no explicit For loop;
+    a terminal dump then leaves the Data table empty during discovery.
     """
     for node in _body_nodes(fn):
         if not isinstance(node, (ast.Return, ast.Assign, ast.AnnAssign)):
             continue
         value = getattr(node, 'value', None)
-        if _is_multi_source_comprehension(value):
+        if _comprehension_is_discovery(value):
+            return True
+        if (_is_bulk_materialize_call(value) or _is_starred_map_list(value)
+                or _is_fold_call(value)):
             return True
     return False
+
+
+def _is_fold_call(node):
+    """``reduce(fn, it, [])`` / ``accumulate(...)`` style folds."""
+    if not isinstance(node, ast.Call):
+        return False
+    if isinstance(node.func, ast.Name) and node.func.id in ('reduce', 'accumulate'):
+        return True
+    if isinstance(node.func, ast.Attribute) and node.func.attr in ('reduce', 'accumulate'):
+        return True
+    return False
+
+
+def _is_map_family_call(node):
+    """``map(fn, it)`` / ``starmap(fn, it)`` / ``itertools.starmap(...)``."""
+    if not isinstance(node, ast.Call):
+        return False
+    if isinstance(node.func, ast.Name) and node.func.id in (
+            'map', 'starmap', 'filter', 'filterfalse'):
+        return len(node.args) >= 2 or (
+            node.func.id in ('map', 'starmap') and len(node.args) >= 1)
+    if isinstance(node.func, ast.Attribute) and node.func.attr in (
+            'map', 'starmap', 'filter', 'filterfalse'):
+        return True
+    return False
+
+
+def _is_materialize_wrapper_name(name):
+    return name in (
+        'list', 'tuple', 'set', 'dict', 'sorted', 'reversed', 'deque', 'frozenset',
+    )
+
+
+def _call_looks_like_source_fetch(call):
+    """``fetch_all()`` / ``load_pages()`` / ``get_source_items()`` style calls."""
+    if not isinstance(call, ast.Call):
+        return False
+    name = (_called_name(call) or '').lower()
+    if not name:
+        if isinstance(call.func, ast.Attribute):
+            name = str(call.func.attr or '').lower()
+    if _looks_like_source_iter_name(name):
+        return True
+    return any(token in name for token in (
+        'fetch', 'load', 'query', 'scan', 'page', 'read', 'source',
+        'get_all', 'list_', 'pull', 'download', 'search', 'crawl',
+    ))
+
+
+def _call_arg_is_discovery_iterable(arg, functions=None, method_aliases=None):
+    """True when a call argument is a discovery-shaped iterable expression."""
+    functions = functions or {}
+    method_aliases = method_aliases or set()
+    if isinstance(arg, (ast.GeneratorExp, ast.ListComp, ast.SetComp, ast.DictComp)):
+        return _comprehension_is_discovery(arg)
+    # Bare source buffer: list(source_items) / sorted(source_pages, key=...)
+    if isinstance(arg, ast.Name) and _looks_like_source_iter_name(arg.id):
+        return True
+    if isinstance(arg, ast.Attribute) and _looks_like_source_iter_name(arg.attr):
+        return True
+    if _call_looks_like_source_fetch(arg):
+        return True
+    if _is_map_family_call(arg) or _is_bulk_materialize_call(arg, functions, method_aliases):
+        return True
+    if _is_fold_call(arg) and _fold_builds_entity_buffer(arg, functions, method_aliases):
+        return True
+    return False
+
+
+def _is_bulk_materialize_call(node, functions=None, method_aliases=None):
+    """``list(chain.from_iterable(...))`` / ``list(map(...))`` / ``list(genexp)``."""
+    functions = functions or {}
+    method_aliases = method_aliases or set()
+    if not isinstance(node, ast.Call):
+        return False
+    if isinstance(node.func, ast.Attribute) and node.func.attr == 'from_iterable':
+        return True
+    # dict.fromkeys(source_items) materializes keys then dumps.
+    if isinstance(node.func, ast.Attribute) and node.func.attr == 'fromkeys':
+        return any(
+            _call_arg_is_discovery_iterable(arg, functions, method_aliases)
+            for arg in node.args
+        )
+    if isinstance(node.func, ast.Attribute) and node.func.attr in (
+            'deque', 'sorted'):
+        return any(
+            _call_arg_is_discovery_iterable(arg, functions, method_aliases)
+            for arg in node.args
+        )
+    if _is_map_family_call(node):
+        return True
+    # list/tuple/set/sorted/deque(... discovery iterable ...)
+    if isinstance(node.func, ast.Name) and _is_materialize_wrapper_name(node.func.id):
+        return any(
+            _call_arg_is_discovery_iterable(arg, functions, method_aliases)
+            for arg in node.args
+        )
+    return False
+
+
+def _is_starred_map_list(node):
+    """``[*map(fn, items)]`` / ``[*starmap(...)]`` list display."""
+    if not isinstance(node, ast.List) or len(node.elts) != 1:
+        return False
+    el = node.elts[0]
+    return isinstance(el, ast.Starred) and _is_map_family_call(el.value)
+
+
+def _fold_builds_entity_buffer(call, functions, method_aliases):
+    """Heuristic: fold builds a collection of entities, not a scalar total."""
+    if not _is_fold_call(call):
+        return False
+    # initial=[] / {} / set()
+    if len(call.args) >= 3:
+        init = call.args[2]
+        if isinstance(init, (ast.List, ast.Dict, ast.Set)):
+            return True
+        if isinstance(init, ast.Constant) and init.value in ([], (), None):
+            return True
+        if isinstance(init, ast.Call) and isinstance(init.func, ast.Name) and init.func.id in (
+                'list', 'dict', 'set'):
+            return True
+    for kw in call.keywords:
+        if kw.arg in ('initial', 'initializer'):
+            return True
+    # reducer accumulates entities
+    if call.args:
+        reducer = call.args[0]
+        if isinstance(reducer, ast.Lambda):
+            return True
+        if isinstance(reducer, ast.Name):
+            helper = functions.get(reducer.id)
+            if helper and _function_produces_entities(helper, functions, method_aliases):
+                return True
+    # Default: reduce over a multi-arg iterable is discovery-shaped when records
+    # are deferred (callers still require outside records to fire).
+    return len(call.args) >= 2
+
+
+def _find_functional_accumulation_violations(tree, functions, method_aliases):
+    """Flag reduce/accumulate/chain/map/genexp materialize then terminal dump."""
+    if not _tree_has_record_events(tree, functions):
+        return []
+    violations = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        value = node.value
+        if value is None:
+            continue
+        lineno = getattr(node, 'lineno', 0) or 0
+        if _is_fold_call(value) and _fold_builds_entity_buffer(
+                value, functions, method_aliases):
+            violations.append(('ROW_LIVENESS_MISSING', lineno))
+            continue
+        if _is_bulk_materialize_call(value, functions, method_aliases):
+            violations.append(('ROW_LIVENESS_MISSING', lineno))
+            continue
+        if _is_starred_map_list(value):
+            violations.append(('ROW_LIVENESS_MISSING', lineno))
+            continue
+        # Bare discovery genexp/listcomp assigned then flushed later.
+        if isinstance(value, (ast.GeneratorExp, ast.ListComp, ast.SetComp,
+                              ast.DictComp)) and _comprehension_is_discovery(value):
+            violations.append(('ROW_LIVENESS_MISSING', lineno))
+    return violations
 
 
 def _canary_visibility_violations(tree):
@@ -714,6 +949,37 @@ def _ancestor_loop_has_record_kinds(loop, parents, functions):
     return False
 
 
+def _tree_has_record_events(tree, functions):
+    """True when any ledger record emit exists (module or function body)."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _is_ledger_record_call(node):
+            return True
+    for fn in functions.values():
+        if _function_record_kinds(fn, functions):
+            return True
+    return False
+
+
+def _is_parallel_map_call(node):
+    """``map(fn, items)`` / ``executor.map(fn, items)`` / ``pool.imap(...)``."""
+    if not isinstance(node, ast.Call) or len(node.args) < 2:
+        return False
+    if isinstance(node.func, ast.Name) and node.func.id == 'map':
+        return True
+    if isinstance(node.func, ast.Attribute) and node.func.attr in _PARALLEL_MAP_ATTRS:
+        return True
+    return False
+
+
+def _parallel_map_worker(node, functions):
+    if not node.args:
+        return None
+    first = node.args[0]
+    if isinstance(first, ast.Name):
+        return functions.get(first.id)
+    return None
+
+
 def _find_row_liveness_violations(tree, parents=None):
     """Flag slow loops that leave the Data table empty until a later dump.
 
@@ -725,10 +991,14 @@ def _find_row_liveness_violations(tree, parents=None):
 
     Nested pagination under a parent that records, and read-only file replay
     loops, are exempt from the silent-accumulation rule.
+
+    Also flags multi-source comprehension builders and parallel map/executor
+    fan-out that accumulate without streaming records.
     """
     parents = parents or _parent_map(tree)
     functions = _function_defs(tree)
     aliases, attr_aliases = _heartbeat_aliases(tree)
+    method_aliases = _collection_method_aliases(tree)
     violations = []
     for loop in ast.walk(tree):
         if not isinstance(loop, LOOP_TYPES):
@@ -737,7 +1007,7 @@ def _find_row_liveness_violations(tree, parents=None):
         has_heartbeat = _loop_emits_event(
             loop, 'heartbeat', functions, aliases=aliases,
             attr_aliases=attr_aliases)
-        produces = _loop_produces_entities(loop, functions)
+        produces = _loop_produces_entities(loop, functions, method_aliases)
         if has_heartbeat:
             if not kinds:
                 violations.append(('ROW_LIVENESS_MISSING', loop.lineno))
@@ -750,19 +1020,49 @@ def _find_row_liveness_violations(tree, parents=None):
                 continue
             violations.append(('ROW_LIVENESS_MISSING', loop.lineno))
     # Comprehension-only builders: no For/While, but discovery is still silent
-    # when another function later dumps planned records (terminal dump pattern).
-    module_has_outside_records = False
-    for fn in functions.values():
-        if _function_record_kinds(fn, functions):
-            module_has_outside_records = True
-            break
-    if module_has_outside_records:
+    # when records are dumped later (including module-level flush loops).
+    if _tree_has_record_events(tree, functions):
         for fn in functions.values():
             if not _function_comprehension_discovery(fn):
                 continue
             if _function_record_kinds(fn, functions):
                 continue
             violations.append(('ROW_LIVENESS_MISSING', fn.lineno))
+        # Module-level discovery comps assigned then flushed.
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue
+            # Skip assigns inside functions (handled above via function body).
+            parent = parents.get(node)
+            in_fn = False
+            while parent is not None:
+                if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    in_fn = True
+                    break
+                if isinstance(parent, ast.Module):
+                    break
+                parent = parents.get(parent)
+            if in_fn:
+                continue
+            value = node.value
+            if _comprehension_is_discovery(value):
+                violations.append(('ROW_LIVENESS_MISSING', node.lineno))
+    # Parallel map/executor fan-out: no for/while, silent accumulation in worker.
+    if _tree_has_record_events(tree, functions):
+        for node in ast.walk(tree):
+            if not _is_parallel_map_call(node):
+                continue
+            worker = _parallel_map_worker(node, functions)
+            if worker is None:
+                continue
+            if _function_record_kinds(worker, functions):
+                continue
+            if _function_produces_entities(worker, functions, method_aliases):
+                violations.append(('ROW_LIVENESS_MISSING', node.lineno))
+    # Functional folds / bulk materialize then terminal dump (reduce, chain, …).
+    violations.extend(
+        _find_functional_accumulation_violations(tree, functions, method_aliases)
+    )
     return violations
 
 

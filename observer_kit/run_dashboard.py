@@ -234,11 +234,54 @@ def _last_event(path):
     return {}
 
 
+def _lock_path_for_events(events_path: str):
+    """Best-effort path to the scope lock for a ledger events file.
+
+    Preferred layout: ``<state>/runs/<lane>/events.jsonl`` → ``<state>/<lane>.lock``.
+    Legacy flat: ``<state>/<lane>.jsonl`` → ``<state>/<lane>.lock``.
+    """
+    abs_path = os.path.abspath(events_path)
+    base = os.path.basename(abs_path)
+    parent = os.path.dirname(abs_path)
+    if base == 'events.jsonl':
+        lane = os.path.basename(parent)
+        runs_root = os.path.dirname(parent)
+        if os.path.basename(runs_root) == 'runs':
+            state_dir = os.path.dirname(runs_root)
+            return os.path.join(state_dir, f'{lane}.lock')
+    if base.endswith('.jsonl'):
+        lane = base[:-6]
+        return os.path.join(parent, f'{lane}.lock')
+    return None
+
+
 def _is_live_run(path, mtime, now):
-    """A fresh terminal event means finished, even though the file is recent."""
+    """Whether the operator should treat this run as still executing.
+
+    Terminal ledger events always win. Otherwise consult the matching source
+    lock: a dead (or released) lock holder must not keep the sidebar green after
+    SIGKILL — mtime alone stays fresh within ACTIVE_S with no terminal event.
+    """
     last = _last_event(path)
     event = last.get('event') or last.get('action')
     if event in {'run_finished', 'run_failed', 'run_abandoned', 'run_paused'}:
+        return False
+    lock_path = _lock_path_for_events(path)
+    if lock_path and os.path.isfile(lock_path):
+        try:
+            with open(lock_path, encoding='utf-8') as fh:
+                lock = json.load(fh)
+            pid = int(lock.get('pid') or 0)
+            if pid <= 0:
+                return False
+            if not _pid_alive(pid):
+                return False
+            return True
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            pass
+    # Event-stamped worker pid (when present) beats bare mtime.
+    event_pid = last.get('pid')
+    if event_pid is not None and not _pid_alive(event_pid):
         return False
     return now - mtime < ACTIVE_S
 
