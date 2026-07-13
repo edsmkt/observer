@@ -2,12 +2,14 @@
 
 <p align="center"><strong>Visible execution and orchestration for agent-run data work.</strong></p>
 
-<p align="center"><strong>Observer Kit</strong> supervises each run. <strong>Observer Flow</strong> coordinates dependent steps.</p>
+<p align="center"><strong>Observer Kit</strong> supervises each run. <strong>Observer Flow</strong> coordinates dependent steps.<br />
+Agents orient through an <strong>AXI</strong> CLI; humans review on the local dashboard.</p>
 
 <p align="center">
   <img alt="Python 3.9+" src="https://img.shields.io/badge/python-3.9%2B-3776AB?style=flat-square" />
   <img alt="Platform macOS and Linux" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-4D8D6E?style=flat-square" />
   <img alt="Local first" src="https://img.shields.io/badge/local--first-yes-2F855A?style=flat-square" />
+  <img alt="AXI" src="https://img.shields.io/badge/AXI-agent%20CLI-0D9488?style=flat-square" />
   <img alt="Agent Skills" src="https://img.shields.io/badge/Agent%20Skills-compatible-5B6EE1?style=flat-square" />
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-5D6570?style=flat-square" />
 </p>
@@ -45,8 +47,10 @@ It gives the collaboration loop a few simple pieces:
   whole run.
 - **Run controls**: pause at a checkpoint, stop after the current record, and
   approve a full run only after reviewing a sample.
-- **An agent playbook and small CLI**: the agent builds the workflow; the CLI
-  provides the repeatable local plumbing.
+- **An agent playbook**: skill judgment for sample, locks, and full-run approval.
+- **An AXI CLI**: dense TOON status (`observer-kit axi`) so agents know live runs,
+  orphans, and next steps without scraping human help text.
+- **A human dashboard**: localhost review of rows, flow, chat, and controls.
 
 ## How It Works
 
@@ -63,6 +67,12 @@ Agent creates or adapts the real workflow
                  |
           Observer Kit harness
                  |
+        +--------+---------+
+        |                  |
+  observer-kit axi     dashboard
+  (agent status)     (human eyes)
+        |                  |
+        +--------+---------+
                  v
    Live sample, review, controls, and approval
 ```
@@ -180,10 +190,11 @@ process; the script pauses at a checkpoint where it has recorded its progress.
 ## Install
 
 The repository ships one installable Python package, two agent skills, and a
-CLI. **Product runtime** (runguard, dashboard, chat watch, lint, flow
-validator) lives in the `observer_kit` package. The Observer Kit skill is the
-execution **playbook**; the Observer Flow skill is the graph-design playbook.
-Neither skill tree is the canonical home for product `.py` implementation.
+CLI (including an **AXI** agent surface). **Product runtime** (runguard,
+dashboard, chat watch, lint, flow validator, axi) lives in the `observer_kit`
+package. The Observer Kit skill is the execution **playbook**; the Observer
+Flow skill is the graph-design playbook. Neither skill tree is the canonical
+home for product `.py` implementation.
 
 Install the package/CLI first. During agent-led setup, the skills probe for the
 CLI, install it in a writable Python environment when needed, and verify it
@@ -374,14 +385,41 @@ observer-kit test
 
 ### Agent AXI
 
-Agents should prefer the **`observer-kit axi`** surface for orientation (runs,
-orphans, next steps) with dense TOON on stdout. Human visual review stays on
-`observer-kit dashboard`. Example:
+Observer ships an **[AXI](https://github.com/kunchenguid/axi)**-style agent
+surface: token-efficient TOON on stdout, definitive empty states, structured
+exit codes, and `help[]` next steps. It is for **agents operating the harness**,
+not a replacement for the skill playbook or the human dashboard.
+
+| Surface | Audience | Job |
+| --- | --- | --- |
+| **Skills** (Kit / Flow) | Agent judgment | When to sample, lock, approve, graph |
+| **`observer-kit axi`** | Agent orientation | Runs, live?, orphans, doctor, next commands |
+| **`observer-kit dashboard`** | Human review | Rows, flow graph, chat, controls |
+| **Package API** | Workflow scripts | `start_observed_run`, intents, receipts |
 
 ```bash
+# Home: state, live runs, orphan count, next steps (TOON)
 observer-kit axi --state-dir .observer
+
 observer-kit axi runs --state-dir .observer
+observer-kit axi run --state-dir .observer --id runguard:my-lane
+observer-kit axi doctor .
+observer-kit axi ps --state-dir .observer
+observer-kit axi help
+
+# Human visual review (separate process)
+observer-kit dashboard .observer
+
+# Chat respond loop (still use poll for listening UI)
 observer-kit poll .observer --all
+```
+
+Tell agents in `AGENTS.md` / project instructions:
+
+```text
+Use observer-kit axi for status and next steps (TOON on stdout).
+Use the Observer Kit skill for sample, locks, and full-run approval.
+Use observer-kit dashboard for the human; do not scrape the HTML.
 ```
 
 Run the full acceptance suite from this repository with:
