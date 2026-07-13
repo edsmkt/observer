@@ -130,9 +130,16 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
     state_dir = Path(args.state_dir).expanduser().resolve()
     state_dir.mkdir(parents=True, exist_ok=True)
     script = _runtime_module_path("run_dashboard")
+    argv = [str(script), str(state_dir), "--port", str(args.port)]
+    parent_pid = getattr(args, "parent_pid", None)
+    if parent_pid is not None:
+        argv.extend(["--parent-pid", str(parent_pid)])
+    idle = getattr(args, "idle_timeout", None)
+    if idle is not None and float(idle) > 0:
+        argv.extend(["--idle-timeout", str(idle)])
     old_argv = sys.argv[:]
     try:
-        sys.argv = [str(script), str(state_dir), "--port", str(args.port)]
+        sys.argv = argv
         try:
             runpy.run_path(str(script), run_name="__main__")
         except KeyboardInterrupt:
@@ -655,7 +662,13 @@ def _dashboard_serves(state_dir: Path, port: int) -> bool:
         return False
 
 
-def _start_dashboard(state_dir: Path, port: int) -> tuple[subprocess.Popen | None, bool]:
+def _start_dashboard(
+    state_dir: Path,
+    port: int,
+    *,
+    parent_pid: int | None = None,
+    idle_timeout: float | None = None,
+) -> tuple[subprocess.Popen | None, bool]:
     state_dir = state_dir.expanduser().resolve()
     if _dashboard_serves(state_dir, port):
         return None, True
@@ -680,9 +693,20 @@ def _start_dashboard(state_dir: Path, port: int) -> tuple[subprocess.Popen | Non
         raise
     except (OSError, URLError):
         pass
+    cmd = [
+        sys.executable,
+        str(_runtime_module_path("run_dashboard")),
+        str(state_dir),
+        "--port",
+        str(port),
+    ]
+    # Bind dashboard lifetime to the launcher unless the operator asked to keep it.
+    if parent_pid is not None:
+        cmd.extend(["--parent-pid", str(parent_pid)])
+    if idle_timeout is not None and float(idle_timeout) > 0:
+        cmd.extend(["--idle-timeout", str(idle_timeout)])
     proc = subprocess.Popen(
-        [sys.executable, str(_runtime_module_path("run_dashboard")), str(state_dir),
-         "--port", str(port)],
+        cmd,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         text=True,
@@ -759,7 +783,15 @@ def cmd_run(args: argparse.Namespace) -> int:
             watcher_thread.start()
 
     if args.dashboard:
-        dashboard_proc, dashboard_attached = _start_dashboard(state_dir, args.port)
+        # Bind child dashboard to this process unless --keep-dashboard (intentional orphan).
+        dash_parent = None if args.keep_dashboard else os.getpid()
+        dash_idle = getattr(args, "idle_timeout", None)
+        dashboard_proc, dashboard_attached = _start_dashboard(
+            state_dir,
+            args.port,
+            parent_pid=dash_parent,
+            idle_timeout=dash_idle,
+        )
         state = "attached to existing dashboard" if dashboard_attached else "dashboard started"
         print(f"[observer] {state}: http://localhost:{args.port}/", flush=True)
 
@@ -843,6 +875,355 @@ def cmd_run(args: argparse.Namespace) -> int:
     return rc
 
 
+DASHBOARD_META_NAME = ".observer-dashboard.json"
+# Ports scanned by ``ps`` / ``stop`` when discovering live dashboards without a meta file.
+_DASHBOARD_PORT_SCAN = range(8484, 8521)
+
+
+def _read_json_file(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _dashboard_meta_path(state_dir: Path) -> Path:
+    return state_dir.expanduser().resolve() / DASHBOARD_META_NAME
+
+
+def _load_dashboard_meta(state_dir: Path) -> dict | None:
+    path = _dashboard_meta_path(state_dir)
+    if not path.is_file():
+        return None
+    meta = _read_json_file(path)
+    return meta or None
+
+
+def _probe_dashboard_port(port: int) -> dict | None:
+    """Return live dashboard info from /api/meta when something answers on port."""
+    try:
+        with urlopen(f"http://127.0.0.1:{port}/api/meta", timeout=0.25) as response:
+            if response.status != 200:
+                return None
+            payload = json.loads(response.read().decode("utf-8") or "{}")
+    except (OSError, URLError, json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    raw = payload.get("state_dir") or payload.get("runguard") or ""
+    if not raw:
+        return None
+    try:
+        state = str(Path(raw).expanduser().resolve())
+    except OSError:
+        state = str(raw)
+    pid = payload.get("pid")
+    parent = payload.get("parent_pid")
+    return {
+        "kind": "dashboard",
+        "source": "live",
+        "port": int(payload.get("port") or port),
+        "pid": pid,
+        "parent_pid": parent,
+        "state_dir": state,
+        "idle_timeout": payload.get("idle_timeout"),
+        "active": True,
+        "orphan": bool(parent) and not _pid_alive(parent),
+        "pid_alive": _pid_alive(pid) if pid is not None else True,
+    }
+
+
+def _dashboard_records(state_dirs: list[Path] | None, *, scan_ports: bool) -> list[dict]:
+    """Inventory dashboards from meta files and/or live port probes."""
+    found: dict[tuple, dict] = {}
+
+    def _key(rec: dict) -> tuple:
+        return (rec.get("port"), rec.get("state_dir"), rec.get("pid"))
+
+    def _add(rec: dict) -> None:
+        if not rec:
+            return
+        found[_key(rec)] = rec
+
+    for state in state_dirs or []:
+        meta = _load_dashboard_meta(state)
+        if not meta:
+            continue
+        pid = meta.get("pid")
+        parent = meta.get("parent_pid")
+        alive = _pid_alive(pid) if pid is not None else False
+        port = meta.get("port")
+        live = _probe_dashboard_port(int(port)) if port is not None and alive else None
+        rec = {
+            "kind": "dashboard",
+            "source": "meta",
+            "port": port,
+            "pid": pid,
+            "parent_pid": parent,
+            "state_dir": str(state.expanduser().resolve()),
+            "idle_timeout": meta.get("idle_timeout"),
+            "started": meta.get("started"),
+            "active": bool(meta.get("active", True)) and alive,
+            "pid_alive": alive,
+            "orphan": bool(parent) and not _pid_alive(parent) and alive,
+        }
+        if live:
+            rec["source"] = "meta+live"
+            rec["orphan"] = live.get("orphan", rec["orphan"])
+            rec["pid"] = live.get("pid") or rec["pid"]
+        _add(rec)
+
+    if scan_ports:
+        for port in _DASHBOARD_PORT_SCAN:
+            live = _probe_dashboard_port(port)
+            if live:
+                _add(live)
+
+    return sorted(
+        found.values(),
+        key=lambda r: (int(r.get("port") or 0), str(r.get("state_dir") or "")),
+    )
+
+
+def _watcher_records(state_dir: Path) -> list[dict]:
+    out = []
+    for watcher in _active_watchers(state_dir):
+        parent = watcher.get("parent_pid")
+        pid = watcher.get("pid")
+        dead_parent = (
+            parent is not None and not _pid_alive(parent) and _pid_alive(pid)
+        )
+        out.append({
+            "kind": "watcher",
+            "pid": pid,
+            "parent_pid": parent,
+            "mode": watcher.get("mode"),
+            "run": watcher.get("run"),
+            "key": watcher.get("key"),
+            "started": watcher.get("started"),
+            "state_dir": str(state_dir.expanduser().resolve()),
+            "pid_alive": _pid_alive(pid),
+            # Orphan = still running after the owning parent died.
+            "orphan": dead_parent,
+            "independent": parent is None,
+        })
+    return out
+
+
+def _terminate_pid(pid: object, *, wait: float = 2.0) -> str:
+    """SIGTERM then SIGKILL a process. Returns action label."""
+    try:
+        pid_i = int(pid)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return "skip"
+    if pid_i <= 0 or not _pid_alive(pid_i):
+        return "dead"
+    try:
+        os.kill(pid_i, 15)  # SIGTERM
+    except OSError:
+        return "error"
+    deadline = time.time() + wait
+    while time.time() < deadline:
+        if not _pid_alive(pid_i):
+            return "terminated"
+        time.sleep(0.05)
+    try:
+        os.kill(pid_i, 9)  # SIGKILL
+    except OSError:
+        return "error"
+    return "killed"
+
+
+def cmd_ps(args: argparse.Namespace) -> int:
+    """List Observer dashboards and watchers (and flag orphans)."""
+    unique_dirs = _resolve_state_dirs(args)
+    scan = not bool(getattr(args, "no_scan", False))
+    dashboards = _dashboard_records(unique_dirs or None, scan_ports=scan)
+
+    watchers: list[dict] = []
+    for path in unique_dirs:
+        watchers.extend(_watcher_records(path))
+
+    if not dashboards and not watchers:
+        print("no observer dashboards or watchers found")
+        if not unique_dirs:
+            print("tip: pass a state dir to list watchers, e.g. observer-kit ps .observer")
+        return 0
+
+    if dashboards:
+        print("dashboards:")
+        for rec in dashboards:
+            flags = []
+            if rec.get("orphan"):
+                flags.append("ORPHAN")
+            if rec.get("parent_pid") is None and rec.get("pid_alive"):
+                flags.append("independent")
+            if not rec.get("pid_alive", True):
+                flags.append("dead")
+            if not rec.get("active", True):
+                flags.append("inactive")
+            flag_s = f" [{' '.join(flags)}]" if flags else ""
+            print(
+                f"  port={rec.get('port')} pid={rec.get('pid')} "
+                f"parent={rec.get('parent_pid') or 'independent'} "
+                f"state={rec.get('state_dir')}{flag_s}"
+            )
+    if watchers:
+        print("watchers:")
+        for rec in watchers:
+            flags = []
+            if rec.get("orphan"):
+                flags.append("ORPHAN")
+            if rec.get("independent"):
+                flags.append("independent")
+            flag_s = f" [{' '.join(flags)}]" if flags else ""
+            target = "all runs" if rec.get("mode") == "all" else rec.get("run")
+            print(
+                f"  pid={rec.get('pid')} parent={rec.get('parent_pid') or 'independent'} "
+                f"target={target} state={rec.get('state_dir')}{flag_s}"
+            )
+    orphans = sum(1 for r in dashboards + watchers if r.get("orphan"))
+    if orphans:
+        print(
+            f"{orphans} orphan(s) — reaping: observer-kit stop --orphans"
+            + (f" {unique_dirs[0]}" if unique_dirs else "")
+        )
+    return 0
+
+
+def _resolve_state_dirs(args: argparse.Namespace) -> list[Path]:
+    paths: list[Path] = []
+    if getattr(args, "state_dir", None):
+        paths.append(Path(args.state_dir).expanduser().resolve())
+    for extra in getattr(args, "state_dirs", None) or []:
+        paths.append(Path(extra).expanduser().resolve())
+    seen: set[str] = set()
+    out: list[Path] = []
+    for path in paths:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(path)
+    return out
+
+
+def _should_stop_process(
+    rec: dict,
+    *,
+    stop_all: bool,
+    independent: bool,
+    orphans_only: bool,
+) -> bool:
+    if not rec.get("pid_alive", True) and not _pid_alive(rec.get("pid")):
+        return False
+    if stop_all:
+        return True
+    if rec.get("orphan"):
+        return True
+    if independent and rec.get("parent_pid") is None and _pid_alive(rec.get("pid")):
+        return True
+    if orphans_only:
+        return False
+    return False
+
+
+def cmd_stop(args: argparse.Namespace) -> int:
+    """Stop Observer dashboards/watchers (orphans by default, or --all)."""
+    unique_dirs = _resolve_state_dirs(args)
+    stop_all = bool(getattr(args, "all", False))
+    independent = bool(getattr(args, "independent", False)) or bool(
+        getattr(args, "sweep", False)
+    )
+    # Default mode: dead-parent orphans. --sweep also drops independent processes.
+    orphans_only = not stop_all
+    port_filter = getattr(args, "port", None)
+    dry_run = bool(getattr(args, "dry_run", False))
+
+    # Discover dashboards via port scan always; filter by state dir when given.
+    dashboards = _dashboard_records(unique_dirs or None, scan_ports=True)
+    if unique_dirs:
+        want = {str(p) for p in unique_dirs}
+        dashboards = [
+            d for d in dashboards
+            if str(Path(str(d.get("state_dir") or ".")).expanduser().resolve()) in want
+        ]
+    if port_filter is not None:
+        dashboards = [d for d in dashboards if int(d.get("port") or -1) == int(port_filter)]
+
+    watchers: list[dict] = []
+    for path in unique_dirs:
+        watchers.extend(_watcher_records(path))
+
+    targets: list[tuple[str, dict]] = []
+    for rec in dashboards:
+        if _should_stop_process(
+            rec, stop_all=stop_all, independent=independent, orphans_only=orphans_only,
+        ):
+            targets.append(("dashboard", rec))
+    for rec in watchers:
+        if _should_stop_process(
+            rec, stop_all=stop_all, independent=independent, orphans_only=orphans_only,
+        ):
+            targets.append(("watcher", rec))
+
+    seen_pids: set[tuple[str, int]] = set()
+    unique_targets: list[tuple[str, dict]] = []
+    for kind, rec in targets:
+        try:
+            pid_i = int(rec.get("pid"))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+        key = (kind, pid_i)
+        if key in seen_pids:
+            continue
+        seen_pids.add(key)
+        unique_targets.append((kind, rec))
+
+    if not unique_targets:
+        hint = " (no orphans; use --all, --independent, or --port)" if orphans_only else ""
+        print(f"nothing to stop{hint}")
+        return 0
+
+    stopped = 0
+    for kind, rec in unique_targets:
+        pid = rec.get("pid")
+        if kind == "dashboard":
+            label = (
+                f"dashboard pid={pid} port={rec.get('port')} state={rec.get('state_dir')}"
+            )
+        else:
+            target = rec.get("run") or rec.get("mode")
+            label = f"watcher pid={pid} target={target} state={rec.get('state_dir')}"
+        if dry_run:
+            print(f"would stop {label}")
+            stopped += 1
+            continue
+        action = _terminate_pid(pid)
+        print(f"{action} {label}")
+        if action in {"terminated", "killed", "dead"}:
+            stopped += 1
+            if kind == "dashboard" and rec.get("state_dir"):
+                meta_path = _dashboard_meta_path(Path(str(rec["state_dir"])))
+                if meta_path.is_file():
+                    meta = _read_json_file(meta_path)
+                    if meta.get("pid") in (None, pid):
+                        meta = dict(
+                            meta,
+                            active=False,
+                            stopped=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        )
+                        try:
+                            meta_path.write_text(
+                                json.dumps(meta, ensure_ascii=False, sort_keys=True) + "\n",
+                                encoding="utf-8",
+                            )
+                        except OSError:
+                            pass
+    print(f"stop complete ({stopped} process(es))")
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     project = Path(args.project).expanduser().resolve()
     checks = []
@@ -904,6 +1285,8 @@ def build_parser() -> argparse.ArgumentParser:
   observer-kit poll .observer --run runguard:my-run
   observer-kit watch .observer --all --follow
   observer-kit run --state-dir .observer -- python3 workflow.py --dry-run --limit 10
+  observer-kit ps .observer
+  observer-kit stop --sweep .observer
   observer-kit test
 """,
     )
@@ -954,13 +1337,122 @@ next:
   observer-kit dashboard .observer
   observer-kit dashboard ./my-project/.observer --port 8485
 
+  # Bind lifetime to this shell (exits when the shell dies):
+  observer-kit dashboard .observer --parent-pid $$
+
+  # Auto-exit after 30 minutes with no browser/API traffic:
+  observer-kit dashboard .observer --idle-timeout 1800
+
 For long-lived monitoring, keep this server running and launch pipelines in
 separate shells with observer-kit run --state-dir <same-dir> ...
+Inventory/reap: observer-kit ps ; observer-kit stop --orphans
 """,
     )
     dash.add_argument("state_dir", nargs="?", default=".observer", help="ledger/state directory")
     dash.add_argument("--port", type=int, default=8484, help="dashboard port")
+    dash.add_argument(
+        "--parent-pid",
+        type=int,
+        default=None,
+        help="exit when this PID dies (prevents orphan dashboards)",
+    )
+    dash.add_argument(
+        "--idle-timeout",
+        type=float,
+        default=None,
+        help="exit after N seconds with no HTTP traffic (0/omit = no idle exit). "
+             "Also set OBSERVER_DASHBOARD_IDLE.",
+    )
     dash.set_defaults(func=cmd_dashboard)
+
+    ps = sub.add_parser(
+        "ps",
+        help="list Observer dashboards and watchers (flags orphans)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""examples:
+  observer-kit ps
+  observer-kit ps .observer
+  observer-kit ps .observer /tmp/other/.observer
+""",
+    )
+    ps.add_argument(
+        "state_dir",
+        nargs="?",
+        default=None,
+        help="state directory (lists watchers; optional)",
+    )
+    ps.add_argument(
+        "state_dirs",
+        nargs="*",
+        default=[],
+        help="additional state directories",
+    )
+    ps.add_argument(
+        "--no-scan",
+        action="store_true",
+        help="do not scan ports 8484-8520 for live dashboards",
+    )
+    ps.set_defaults(func=cmd_ps)
+
+    stop = sub.add_parser(
+        "stop",
+        help="stop Observer dashboards/watchers (orphans by default)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""examples:
+  # Reap dashboards/watchers whose parent PID is dead:
+  observer-kit stop --orphans
+  observer-kit stop --orphans .observer
+
+  # Stop everything for a state dir (including intentional long-lived):
+  observer-kit stop --all .observer
+
+  # Stop one port:
+  observer-kit stop --port 8485 --all
+
+  # Dry run:
+  observer-kit stop --orphans --dry-run
+""",
+    )
+    stop.add_argument(
+        "state_dir",
+        nargs="?",
+        default=None,
+        help="state directory (required to stop watchers)",
+    )
+    stop.add_argument(
+        "state_dirs",
+        nargs="*",
+        default=[],
+        help="additional state directories",
+    )
+    stop.add_argument(
+        "--orphans",
+        action="store_true",
+        default=True,
+        help="stop processes whose parent PID is dead (default)",
+    )
+    stop.add_argument(
+        "--all",
+        action="store_true",
+        help="stop all matching dashboards/watchers (not only orphans)",
+    )
+    stop.add_argument(
+        "--independent",
+        action="store_true",
+        help="also stop processes started without --parent-pid",
+    )
+    stop.add_argument(
+        "--sweep",
+        action="store_true",
+        help="end-of-session cleanup: orphans + independent (battery-friendly)",
+    )
+    stop.add_argument("--port", type=int, help="only dashboards on this port")
+    stop.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print what would be stopped without killing",
+    )
+    stop.set_defaults(func=cmd_stop)
 
     watch = sub.add_parser(
         "watch",
@@ -1111,7 +1603,10 @@ Session rule:
     run.add_argument("--dashboard", action="store_true", help="start a dashboard for this run")
     run.add_argument("--port", type=int, default=8484, help="dashboard port")
     run.add_argument("--keep-dashboard", action="store_true",
-                     help="leave the dashboard process running after the command exits")
+                     help="leave the dashboard process running after the command exits "
+                          "(does not bind --parent-pid; prefer observer-kit stop later)")
+    run.add_argument("--idle-timeout", type=float, default=None,
+                     help="when starting a dashboard, exit after N idle seconds")
     run.add_argument("--exit-after-run", action="store_true",
                      help="stop dashboard/watch plumbing as soon as the command exits")
     run.add_argument("--watch", choices=["stdout", "none"], default="stdout",

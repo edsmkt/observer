@@ -418,6 +418,18 @@ with tempfile.TemporaryDirectory(prefix="observer-cli-") as tmp:
         ok("dashboard /api/meta reports the served state directory",
            Path(meta.get("state_dir") or "").resolve() == state.resolve(),
            str(meta))
+        ok("dashboard /api/meta exposes process ownership fields",
+           meta.get("pid") is not None and "parent_pid" in meta and "idle_timeout" in meta,
+           str(meta))
+        meta_file = state / ".observer-dashboard.json"
+        ok("dashboard writes ownership meta file",
+           meta_file.is_file() and "pid" in meta_file.read_text(encoding="utf-8"),
+           str(meta_file))
+
+        ps = cli("ps", str(state), cwd=project, timeout=10)
+        ok("ps lists the live dashboard",
+           ps.returncode == 0 and "dashboards:" in ps.stdout and str(port) in ps.stdout,
+           ps.stdout + ps.stderr)
 
         other_state = Path(tempfile.mkdtemp(prefix="observer-other-state-"))
         try:
@@ -440,6 +452,87 @@ with tempfile.TemporaryDirectory(prefix="observer-cli-") as tmp:
             dashboard.wait(timeout=3)
         except subprocess.TimeoutExpired:
             dashboard.kill()
+
+
+# --- Process ownership: parent-pid, ps, stop ---------------------------------
+print("\nProcess ownership (parent-pid / ps / stop)")
+with tempfile.TemporaryDirectory(prefix="observer-cli-lifecycle-") as tmp:
+    project = Path(tmp)
+    state = project / ".observer"
+    state.mkdir()
+    port = free_port()
+
+    # Dashboard bound to a short-lived parent exits when that parent dies.
+    launcher = subprocess.Popen(
+        [
+            sys.executable, "-B", "-c",
+            "import os, subprocess, sys, time\n"
+            f"env = dict(os.environ); env['PYTHONPATH'] = {CLI_ENV.get('PYTHONPATH', '')!r}\n"
+            "child = subprocess.Popen(\n"
+            "    [sys.executable, '-B', '-m', 'observer_kit', 'dashboard',\n"
+            f"     {str(state)!r}, '--port', '{port}', '--parent-pid', str(os.getpid())],\n"
+            "    env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,\n"
+            ")\n"
+            "time.sleep(1.5)\n"
+            # parent exits → child should shut down via lifecycle watch
+        ],
+        env=CLI_ENV,
+    )
+    ok("parent-bound dashboard launcher starts", wait_for_dashboard(port))
+    launcher.wait(timeout=10)
+    gone = True
+    for _ in range(40):
+        try:
+            with urlopen(f"http://127.0.0.1:{port}/api/runs", timeout=0.2) as response:
+                if response.status == 200:
+                    gone = False
+                    time.sleep(0.15)
+                    continue
+        except OSError:
+            gone = True
+            break
+    ok("dashboard exits when --parent-pid dies", gone)
+
+    # Independent dashboard + stop --sweep
+    port2 = free_port()
+    dash = subprocess.Popen(
+        [sys.executable, "-B", "-m", "observer_kit", "dashboard",
+         str(state), "--port", str(port2)],
+        cwd=project, env=CLI_ENV,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        ok("independent dashboard starts for stop test", wait_for_dashboard(port2))
+        dry = cli("stop", "--sweep", "--dry-run", "--port", str(port2), str(state),
+                  cwd=project, timeout=10)
+        ok("stop --sweep --dry-run reports the independent dashboard",
+           dry.returncode == 0 and "would stop" in dry.stdout and str(port2) in dry.stdout,
+           dry.stdout + dry.stderr)
+        stopped = cli("stop", "--sweep", "--port", str(port2), str(state),
+                      cwd=project, timeout=15)
+        ok("stop --sweep terminates the independent dashboard",
+           stopped.returncode == 0 and "stop complete" in stopped.stdout,
+           stopped.stdout + stopped.stderr)
+        dead = True
+        for _ in range(30):
+            try:
+                with urlopen(f"http://127.0.0.1:{port2}/api/runs", timeout=0.2) as response:
+                    if response.status == 200:
+                        dead = False
+                        time.sleep(0.1)
+                        continue
+            except OSError:
+                dead = True
+                break
+        ok("swept dashboard no longer serves HTTP", dead)
+    finally:
+        if dash.poll() is None:
+            dash.terminate()
+            try:
+                dash.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                dash.kill()
+
 
 print(f"\n{passed} passed, {failed} failed")
 raise SystemExit(1 if failed else 0)

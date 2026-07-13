@@ -41,19 +41,36 @@ except OSError as exc:
     raise RuntimeError(
         f'Observer dashboard asset is missing or unreadable: {DASHBOARD_JS_PATH}'
     ) from exc
+DASHBOARD_META_NAME = '.observer-dashboard.json'
+
+
 def _parse_cli(argv):
-    """Parse ``run_dashboard.py [state_dir] [--port N]`` without treating flag values as paths."""
+    """Parse ``run_dashboard.py [state_dir] [--port N] [--parent-pid P] [--idle-timeout S]``."""
     port = int(os.environ.get('OBSERVER_PORT', '8484'))
     state_dir = None
+    parent_pid = None
+    raw_idle = os.environ.get('OBSERVER_DASHBOARD_IDLE') or '0'
+    try:
+        idle_timeout = float(raw_idle)
+    except ValueError:
+        idle_timeout = 0.0
     args = list(argv[1:])
     i = 0
+    usage = (
+        'usage: run_dashboard.py [state_dir] [--port N] '
+        '[--parent-pid P] [--idle-timeout SECONDS]'
+    )
+
+    def _need_value(flag):
+        if i + 1 >= len(args):
+            raise SystemExit(usage)
+        return args[i + 1]
+
     while i < len(args):
         arg = args[i]
         if arg == '--port':
-            if i + 1 >= len(args):
-                raise SystemExit('usage: run_dashboard.py [state_dir] [--port N]')
             try:
-                port = int(args[i + 1])
+                port = int(_need_value(arg))
             except ValueError as exc:
                 raise SystemExit(f'invalid --port value: {args[i + 1]!r}') from exc
             i += 2
@@ -65,6 +82,34 @@ def _parse_cli(argv):
                 raise SystemExit(f'invalid --port value: {arg!r}') from exc
             i += 1
             continue
+        if arg == '--parent-pid':
+            try:
+                parent_pid = int(_need_value(arg))
+            except ValueError as exc:
+                raise SystemExit(f'invalid --parent-pid value: {args[i + 1]!r}') from exc
+            i += 2
+            continue
+        if arg.startswith('--parent-pid='):
+            try:
+                parent_pid = int(arg.split('=', 1)[1])
+            except ValueError as exc:
+                raise SystemExit(f'invalid --parent-pid value: {arg!r}') from exc
+            i += 1
+            continue
+        if arg == '--idle-timeout':
+            try:
+                idle_timeout = float(_need_value(arg))
+            except ValueError as exc:
+                raise SystemExit(f'invalid --idle-timeout value: {args[i + 1]!r}') from exc
+            i += 2
+            continue
+        if arg.startswith('--idle-timeout='):
+            try:
+                idle_timeout = float(arg.split('=', 1)[1])
+            except ValueError as exc:
+                raise SystemExit(f'invalid --idle-timeout value: {arg!r}') from exc
+            i += 1
+            continue
         if arg.startswith('-'):
             raise SystemExit(f'unknown option: {arg}')
         if state_dir is None:
@@ -72,15 +117,17 @@ def _parse_cli(argv):
             i += 1
             continue
         raise SystemExit(f'unexpected argument: {arg}')
-    return state_dir, port
+    return state_dir, port, parent_pid, idle_timeout
 
 
-_arg_dir, PORT = _parse_cli(sys.argv)
+_arg_dir, PORT, PARENT_PID, IDLE_TIMEOUT = _parse_cli(sys.argv)
 _runguard_dir = _arg_dir or os.environ.get('RUNGUARD_STATE_DIR') or os.path.join(BASE, '.observer')
 SOURCES = {
     'runguard': _runguard_dir,                          # runguard ledgers + locks
     'push': os.path.join(BASE, 'runs'),                 # per-run subdirs (optional)
 }
+# Touched on each request — used by --idle-timeout to exit quiet orphan servers.
+_LAST_ACTIVITY = [time.time()]
 # Operator notes and controls live in each lane folder under runs/<lane>/.
 # Project-wide presence (run="all") and legacy flat projects still use the
 # state-dir root. Locks/throttles stay at the state-dir root.
@@ -912,6 +959,9 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+    def _touch_activity(self):
+        _LAST_ACTIVITY[0] = time.time()
+
     def _json(self, obj, status: int = 200):
         body = json.dumps(obj).encode()
         self.send_response(status)
@@ -947,6 +997,7 @@ class Handler(BaseHTTPRequestHandler):
         return bool(netloc) and netloc == host
 
     def do_POST(self):
+        self._touch_activity()
         from urllib.parse import urlparse
         u = urlparse(self.path)
         if u.path in {'/api/chat', '/api/control'} and not self._csrf_ok():
@@ -1050,6 +1101,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_GET(self):
+        self._touch_activity()
         from urllib.parse import urlparse, parse_qs
         u = urlparse(self.path)
         if u.path == '/':
@@ -1070,11 +1122,15 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
         elif u.path == '/api/meta':
             # Lets CLI attach only to a dashboard serving the expected state dir.
+            # Also exposes process ownership so `observer-kit ps/stop` can reap orphans.
             self._json({
                 'state_dir': os.path.abspath(SOURCES['runguard']),
                 'runguard': os.path.abspath(SOURCES['runguard']),
                 'push': os.path.abspath(SOURCES['push']),
                 'port': PORT,
+                'pid': os.getpid(),
+                'parent_pid': PARENT_PID,
+                'idle_timeout': IDLE_TIMEOUT,
             })
         elif u.path == '/api/runs':
             self._json(list_runs())
@@ -1176,6 +1232,106 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
 
 
+def _pid_alive(pid):
+    if pid is None:
+        return False
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _dashboard_meta_path(state_dir):
+    return os.path.join(os.path.abspath(state_dir), DASHBOARD_META_NAME)
+
+
+def _write_dashboard_meta(state_dir, port, parent_pid, idle_timeout):
+    """Persist ownership so ``observer-kit ps/stop`` can inventory and reap."""
+    os.makedirs(state_dir, exist_ok=True)
+    path = _dashboard_meta_path(state_dir)
+    meta = {
+        'kind': 'dashboard',
+        'active': True,
+        'pid': os.getpid(),
+        'port': int(port),
+        'parent_pid': parent_pid,
+        'idle_timeout': float(idle_timeout or 0),
+        'state_dir': os.path.abspath(state_dir),
+        'started': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+    }
+    tmp = path + f'.{os.getpid()}.tmp'
+    with open(tmp, 'w', encoding='utf-8') as fh:
+        json.dump(meta, fh, ensure_ascii=False, sort_keys=True)
+        fh.write('\n')
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+    return path, meta
+
+
+def _clear_dashboard_meta(state_dir, pid=None):
+    path = _dashboard_meta_path(state_dir)
+    try:
+        with open(path, encoding='utf-8') as fh:
+            meta = json.load(fh)
+    except (OSError, ValueError, TypeError):
+        return
+    if pid is not None and meta.get('pid') not in (None, pid):
+        return
+    meta = dict(meta, active=False, stopped=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
+    try:
+        with open(path, 'w', encoding='utf-8') as fh:
+            json.dump(meta, fh, ensure_ascii=False, sort_keys=True)
+            fh.write('\n')
+    except OSError:
+        pass
+
+
+def _lifecycle_watch(httpd, parent_pid, idle_timeout):
+    """Exit when the owning process dies or the server sits idle too long."""
+    while True:
+        time.sleep(1.0)
+        if parent_pid is not None and not _pid_alive(parent_pid):
+            try:
+                httpd.shutdown()
+            except Exception:
+                pass
+            return
+        if idle_timeout and idle_timeout > 0:
+            if (time.time() - _LAST_ACTIVITY[0]) >= float(idle_timeout):
+                try:
+                    httpd.shutdown()
+                except Exception:
+                    pass
+                return
+
+
 if __name__ == '__main__':
-    print(f'run observer → http://localhost:{PORT}')
-    ThreadingHTTPServer(('127.0.0.1', PORT), Handler).serve_forever()
+    state = os.path.abspath(SOURCES['runguard'])
+    os.makedirs(state, exist_ok=True)
+    meta_path, meta = _write_dashboard_meta(state, PORT, PARENT_PID, IDLE_TIMEOUT)
+    bits = [f'run observer → http://localhost:{PORT}', f'state={state}']
+    if PARENT_PID is not None:
+        bits.append(f'parent_pid={PARENT_PID}')
+    if IDLE_TIMEOUT and IDLE_TIMEOUT > 0:
+        bits.append(f'idle_timeout={IDLE_TIMEOUT:g}s')
+    print(' '.join(bits), flush=True)
+    httpd = ThreadingHTTPServer(('127.0.0.1', PORT), Handler)
+    watcher = threading.Thread(
+        target=_lifecycle_watch,
+        args=(httpd, PARENT_PID, IDLE_TIMEOUT),
+        daemon=True,
+        name='observer-dashboard-lifecycle',
+    )
+    watcher.start()
+    try:
+        httpd.serve_forever()
+    finally:
+        try:
+            httpd.server_close()
+        except Exception:
+            pass
+        _clear_dashboard_meta(state, pid=os.getpid())
+        if meta_path:
+            pass

@@ -355,9 +355,14 @@ For dependency-driven workflows, see the
 observer-kit init [project]
 observer-kit lint workflow.py
 observer-kit dashboard [state_dir] --port 8484
+observer-kit dashboard .observer --parent-pid $$          # exit when this shell dies
+observer-kit dashboard .observer --idle-timeout 1800      # exit after 30m idle
 observer-kit run --state-dir .observer -- python3 workflow.py --dry-run --limit 10
 observer-kit watch .observer --run runguard:my-run --follow
 observer-kit reply .observer --run runguard:my-run --anchor run --text "I fixed this."
+observer-kit ps .observer                                 # list dashboards/watchers
+observer-kit stop --orphans                               # dead-parent processes
+observer-kit stop --sweep .observer                       # end-of-session cleanup
 observer-kit doctor [project]
 observer-kit test
 ```

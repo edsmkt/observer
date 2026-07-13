@@ -211,8 +211,8 @@ observer-kit run --state-dir .observer -- python3 workflow.py --full-run
 For interactive dashboard chat, use the AXI-style **poll** loop so the UI shows
 **listening** while you wait (`poll` → note → `reply` → `poll` again). Watcher
 ownership refuses overlapping bridges; parent-owned watchers exit with their CLI
-process. Use `observer-kit watch .observer --status` for inspection.
-
+process. Prefer one dashboard; bind ephemerals with `--parent-pid` /
+`--idle-timeout`; end sessions with `observer-kit stop --sweep .observer`.
 Treat watcher/poll output as transport into the current agent session. Inspect
 the script, JSONL, durable sink, and destination before replying or changing the run.
 

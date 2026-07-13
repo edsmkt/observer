@@ -375,12 +375,17 @@ with tempfile.TemporaryDirectory(prefix='rgdash-') as state:
        'if(viewScroll!==null&&viewScroll!==undefined)content.scrollTop=viewScroll;' in DASHBOARD_SOURCE)
 
 # CLI: flag values must not be mistaken for the state directory.
-state_dir, port = dashboard._parse_cli(['run_dashboard.py', '--port', '8485', 'mydir'])
+state_dir, port, parent_pid, idle = dashboard._parse_cli(
+    ['run_dashboard.py', '--port', '8485', 'mydir'])
 ok("dashboard CLI keeps --port values out of the state-dir slot",
-   state_dir == 'mydir' and port == 8485, f'{state_dir!r} {port!r}')
-state_dir, port = dashboard._parse_cli(['run_dashboard.py', 'mydir', '--port', '9001'])
-ok("dashboard CLI accepts state_dir before --port",
-   state_dir == 'mydir' and port == 9001, f'{state_dir!r} {port!r}')
+   state_dir == 'mydir' and port == 8485 and parent_pid is None,
+   f'{state_dir!r} {port!r} {parent_pid!r}')
+state_dir, port, parent_pid, idle = dashboard._parse_cli(
+    ['run_dashboard.py', 'mydir', '--port', '9001', '--parent-pid', '4242',
+     '--idle-timeout', '30'])
+ok("dashboard CLI accepts state_dir, --port, --parent-pid, and --idle-timeout",
+   state_dir == 'mydir' and port == 9001 and parent_pid == 4242 and idle == 30.0,
+   f'{state_dir!r} {port!r} {parent_pid!r} {idle!r}')
 try:
     dashboard._parse_cli(['run_dashboard.py', '--port'])
     port_err = False
