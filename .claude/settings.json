@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|Read|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/observer-gate.sh",
+            "timeout": 30,
+            "statusMessage": "Observer Kit side-effect gate"
+          }
+        ]
+      }
+    ]
+  }
+}

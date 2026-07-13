@@ -422,6 +422,19 @@ Use the Observer Kit skill for sample, locks, and full-run approval.
 Use observer-kit dashboard for the human; do not scrape the HTML.
 ```
 
+### Side-effect compliance hook
+
+This repo ships a Claude Code **PreToolUse** hook that blocks Write / Read /
+Bash when the agent touches a **side-effect** script (CRM/API writes, DB
+mutations, webhooks, metered loops, …) that is **not** under Observer Kit.
+
+- Gate engine: `observer-kit gate path.py` or `observer-kit gate --command '…'`
+- Hook script: [`.claude/hooks/observer-gate.sh`](.claude/hooks/observer-gate.sh)
+- Project settings: [`.claude/settings.json`](.claude/settings.json)
+
+Escape hatch in a file: `# observer: ignore`. Prefer wiring
+`start_observed_run` and launching with `observer-kit run --state-dir .observer -- …`.
+
 Run the full acceptance suite from this repository with:
 
 ```bash

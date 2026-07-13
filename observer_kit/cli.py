@@ -175,6 +175,7 @@ def cmd_test(args: argparse.Namespace) -> int:
         [sys.executable, "-B", str(tests_dir / "test_dashboard_browser.py")],
         [sys.executable, "-B", str(tests_dir / "test_cli.py")],
         [sys.executable, "-B", str(tests_dir / "test_axi.py")],
+        [sys.executable, "-B", str(tests_dir / "test_gate.py")],
     ]
     if flow_skill_dir.is_dir():
         tests.extend([
@@ -210,6 +211,20 @@ def cmd_validate_flow(args: argparse.Namespace) -> int:
     if args.json:
         argv.append("--json")
     return int(validate_main(argv))
+
+
+def cmd_gate(args: argparse.Namespace) -> int:
+    """Side-effect compliance gate (hook-friendly)."""
+    from observer_kit.gate import main as gate_main
+
+    argv: list[str] = []
+    if getattr(args, "json", False):
+        argv.append("--json")
+    if getattr(args, "command", None):
+        argv.extend(["--command", args.command])
+    if getattr(args, "path", None):
+        argv.append(args.path)
+    return int(gate_main(argv))
 
 
 def _lane_from_run_id(run_id: object) -> str:
@@ -1673,6 +1688,21 @@ next:
         "--json", action="store_true", help="machine-readable output",
     )
     validate_flow.set_defaults(func=cmd_validate_flow)
+
+    gate = sub.add_parser(
+        "gate",
+        help="side-effect compliance gate (force Observer Kit when needed)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""examples:
+  observer-kit gate path/to/script.py
+  observer-kit gate --command 'python3 enrich.py --full-run'
+  # Claude Code PreToolUse: .claude/hooks/observer-gate.sh
+""",
+    )
+    gate.add_argument("path", nargs="?", help="script path to assess")
+    gate.add_argument("--command", help="shell command to assess")
+    gate.add_argument("--json", action="store_true", help="JSON assessment")
+    gate.set_defaults(func=cmd_gate)
 
     dash = sub.add_parser(
         "dashboard",
