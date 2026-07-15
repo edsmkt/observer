@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -24,6 +25,14 @@ REPO = HERE.parents[1]
 PRIMARY = HERE / "flow_coordinator.py"
 BATCH = HERE / "batch_flow_coordinator.py"
 passed = failed = 0
+# Demo coordinators exercise flow wiring; approval gate is covered elsewhere.
+_DEMO_ENV = {
+    **os.environ,
+    "PYTHONPATH": os.pathsep.join(
+        [str(REPO), str(REPO / "tests" / "import_shims"), os.environ.get("PYTHONPATH", "")]
+    ),
+    "OBSERVER_ALLOW_UNAPPROVED_FULL_RUN": "1",
+}
 
 
 def ok(name: str, condition: bool, detail: str = "") -> None:
@@ -47,6 +56,7 @@ def command(script: Path, state: Path, session: str, mode: str, *extra: str):
             *extra,
         ],
         cwd=REPO,
+        env=_DEMO_ENV,
         capture_output=True,
         text=True,
         timeout=30,

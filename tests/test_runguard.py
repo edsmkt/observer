@@ -11,7 +11,15 @@ _REPO = os.path.dirname(_TEST_DIR)
 RG_DIR = sys.argv[1] if len(sys.argv) > 1 else os.path.join(_TEST_DIR, 'import_shims')
 STATE = tempfile.mkdtemp(prefix='rgtest-')
 _PYPATH = os.pathsep.join([_REPO, RG_DIR, os.environ.get('PYTHONPATH', '')])
-ENV = {**os.environ, 'RUNGUARD_STATE_DIR': STATE, 'PYTHONPATH': _PYPATH}
+# Safety-core tests focus on locks/ledgers/throttle; approval gate is covered separately.
+ENV = {
+    **os.environ,
+    'RUNGUARD_STATE_DIR': STATE,
+    'PYTHONPATH': _PYPATH,
+    'OBSERVER_ALLOW_UNAPPROVED_FULL_RUN': '1',
+}
+os.environ['OBSERVER_ALLOW_UNAPPROVED_FULL_RUN'] = '1'
+os.environ['RUNGUARD_STATE_DIR'] = STATE
 
 
 def lane_events(slug: str) -> str:

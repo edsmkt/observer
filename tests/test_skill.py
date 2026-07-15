@@ -285,59 +285,74 @@ with tempfile.TemporaryDirectory(prefix='observer-skill-example-') as tmp:
     env = os.environ.copy()
     env['RUNGUARD_STATE_DIR'] = str(root / 'state')
     env['PYTHONPATH'] = str(REPO) + os.pathsep + env.get('PYTHONPATH', '')
+    # Exercise the real approval gate (do not allow unapproved full runs).
+    env.pop('OBSERVER_ALLOW_UNAPPROVED_FULL_RUN', None)
+    env['OBSERVER_REQUIRE_FULL_RUN_APPROVAL'] = '1'
     base = [sys.executable, '-B', str(EXAMPLE_WORKER),
             '--table', 'alpha', '--limit', '2', '--output', str(output)]
 
     dry = subprocess.run(base + ['--dry-run'], env=env, capture_output=True,
                          text=True, timeout=30)
-    full = subprocess.run(base + ['--full-run'], env=env, capture_output=True,
-                          text=True, timeout=30)
-    resume = subprocess.run(base + ['--full-run'], env=env, capture_output=True,
-                            text=True, timeout=30)
-    rows = ([json.loads(line) for line in output.read_text(encoding='utf-8').splitlines()]
-            if output.is_file() else [])
-    ok('bundled example proves dry-run, full-run, and idempotent resume',
-       dry.returncode == full.returncode == resume.returncode == 0 and
-       len(rows) == 2 and [row.get('id') for row in rows] == ['alpha-001', 'alpha-002'],
-       (dry.stderr + full.stderr + resume.stderr)[-800:])
-
-    third = {
-        'id': 'alpha-003', 'name': 'East', 'source_value': 19,
-        'score': 38, 'segment': 'high', 'provider': 'example-provider',
-    }
-    with output.open('a', encoding='utf-8') as handle:
-        handle.write(json.dumps(third, sort_keys=True) + '\n')
+    # Full-run without approval must refuse (exit 4).
+    refused = subprocess.run(base + ['--full-run'], env=env, capture_output=True,
+                             text=True, timeout=30)
+    ok('bundled example refuses full-run without approval',
+       refused.returncode == 4 and 'approval_required' in refused.stdout,
+       refused.stdout + refused.stderr)
 
     previous_state_dir = os.environ.get('RUNGUARD_STATE_DIR')
     os.environ['RUNGUARD_STATE_DIR'] = env['RUNGUARD_STATE_DIR']
     sys.path.insert(0, str(REPO))
     try:
-        from observer_kit.runguard import start_observed_run
+        from observer_kit.runguard import post_control, predicted_run_id, start_observed_run
+        rid = predicted_run_id('example-transform', source='observer-kit-example:alpha')
+        post_control(rid, 'approve_full_run', note='skill example')
+        full = subprocess.run(base + ['--full-run'], env=env, capture_output=True,
+                              text=True, timeout=30)
+        # Second full-run needs a fresh approval (first success consumed it).
+        post_control(rid, 'approve_full_run', note='skill resume')
+        resume = subprocess.run(base + ['--full-run'], env=env, capture_output=True,
+                                text=True, timeout=30)
+        rows = ([json.loads(line) for line in output.read_text(encoding='utf-8').splitlines()]
+                if output.is_file() else [])
+        ok('bundled example proves dry-run, full-run, and idempotent resume',
+           dry.returncode == full.returncode == resume.returncode == 0 and
+           len(rows) == 2 and [row.get('id') for row in rows] == ['alpha-001', 'alpha-002'],
+           (dry.stderr + full.stderr + resume.stderr + full.stdout + resume.stdout)[-800:])
+
+        third = {
+            'id': 'alpha-003', 'name': 'East', 'source_value': 19,
+            'score': 38, 'segment': 'high', 'provider': 'example-provider',
+        }
+        with output.open('a', encoding='utf-8') as handle:
+            handle.write(json.dumps(third, sort_keys=True) + '\n')
+
+        post_control(rid, 'approve_full_run', note='crash setup')
         pending_run = start_observed_run(
             'example-transform', source='observer-kit-example:alpha',
             destination=str(output), transform_version='v1')
         pending_run.write_intent('alpha-003', 'example-jsonl', payload={
             key: value for key, value in third.items() if key != 'id'})
         pending_run.fail('simulated crash after destination append')
+        post_control(rid, 'approve_full_run', note='recover')
+        recover = subprocess.run(
+            [sys.executable, '-B', str(EXAMPLE_WORKER),
+             '--table', 'alpha', '--limit', '3', '--output', str(output), '--full-run'],
+            env=env, capture_output=True, text=True, timeout=30)
+        recovered_rows = [json.loads(line) for line in output.read_text(encoding='utf-8').splitlines()]
+        state = root / 'state'
+        ledgers = list(state.glob('runs/*/events.jsonl')) + list(state.glob('*.jsonl'))
+        ledger_text = '\n'.join(path.read_text(encoding='utf-8') for path in ledgers)
+        ok('bundled example reconciles append-before-receipt recovery',
+           recover.returncode == 0 and len(recovered_rows) == 3 and
+           '"reconciled": true' in ledger_text,
+           recover.stderr[-800:] + recover.stdout[-400:])
     finally:
         sys.path.pop(0)
         if previous_state_dir is None:
             os.environ.pop('RUNGUARD_STATE_DIR', None)
         else:
             os.environ['RUNGUARD_STATE_DIR'] = previous_state_dir
-
-    recover = subprocess.run(
-        [sys.executable, '-B', str(EXAMPLE_WORKER),
-         '--table', 'alpha', '--limit', '3', '--output', str(output), '--full-run'],
-        env=env, capture_output=True, text=True, timeout=30)
-    recovered_rows = [json.loads(line) for line in output.read_text(encoding='utf-8').splitlines()]
-    state = root / 'state'
-    ledgers = list(state.glob('runs/*/events.jsonl')) + list(state.glob('*.jsonl'))
-    ledger_text = '\n'.join(path.read_text(encoding='utf-8') for path in ledgers)
-    ok('bundled example reconciles append-before-receipt recovery',
-       recover.returncode == 0 and len(recovered_rows) == 3 and
-       '"reconciled": true' in ledger_text,
-       recover.stderr[-800:])
 
 print(f'\n{passed} passed, {failed} failed')
 sys.exit(1 if failed else 0)

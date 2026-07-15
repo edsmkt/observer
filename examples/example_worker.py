@@ -5,6 +5,7 @@ Start the dashboard first, then run a reviewed sample and an intentional write:
 
   observer-kit dashboard .observer
   python3 example_worker.py --table alpha --dry-run --limit 2
+  # After dashboard Approve full run (or post_control), then:
   python3 example_worker.py --table alpha --full-run
 
 Use ``--table beta`` for a disjoint source that can run concurrently. A second
@@ -20,7 +21,7 @@ import os
 from pathlib import Path
 
 from observer_kit.runguard import (
-    PendingWrite, RunPaused, input_snapshot, ledger,
+    ApprovalRequired, PendingWrite, RunPaused, input_snapshot, ledger,
     operation_key, start_observed_run, throttle,
 )
 
@@ -98,24 +99,34 @@ def main() -> int:
 
     output = (args.output or Path('.observer') / f'example-{args.table}-output.jsonl').resolve()
     source = f'observer-kit-example:{args.table}'
-    run = start_observed_run(
-        'example-transform',
-        source=source,
-        input_snapshot=input_snapshot(source, records=TABLES[args.table]),
-        destination=str(output),
-        transform_version='v1',
-        script=__file__,
-        dry_run=args.dry_run,
-        description=f'Transform fixture table {args.table}',
-        todo=len(rows),
-        progress_table='records',
-        summary_metrics=[
-            {'key': 'processed', 'label': 'processed'},
-            {'key': 'delivered', 'label': 'delivered'},
-            {'key': 'skipped', 'label': 'already delivered'},
-        ],
-        max_provider_calls=len(rows),
-    )
+    try:
+        run = start_observed_run(
+            'example-transform',
+            source=source,
+            input_snapshot=input_snapshot(source, records=TABLES[args.table]),
+            destination=str(output),
+            transform_version='v1',
+            script=__file__,
+            dry_run=args.dry_run,
+            description=f'Transform fixture table {args.table}',
+            todo=len(rows),
+            progress_table='records',
+            summary_metrics=[
+                {'key': 'processed', 'label': 'processed'},
+                {'key': 'delivered', 'label': 'delivered'},
+                {'key': 'skipped', 'label': 'already delivered'},
+            ],
+            max_provider_calls=len(rows),
+        )
+    except ApprovalRequired as exc:
+        # Exit 4 = approval missing (agents can branch without scraping prose).
+        print(f'error: approval_required', flush=True)
+        print(f'  run: {exc.run_id}', flush=True)
+        print(
+            f'  help: review dry-run sample, approve in dashboard, then retry full-run',
+            flush=True,
+        )
+        return int(getattr(exc, 'exit_code', 4) or 4)
 
     try:
         delivered = read_delivered(output)

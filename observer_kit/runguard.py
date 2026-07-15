@@ -104,6 +104,29 @@ class PendingWrite(RuntimeError):
     """A prior write intent has no receipt, so a duplicate write is unsafe."""
 
 
+class ApprovalRequired(RuntimeError):
+    """Full-run refused: no valid unacked ``approve_full_run`` control.
+
+    Agents should treat this as a hard stop (CLI exit code 4), not a soft warning.
+    Post approval via the dashboard control or ``post_control(run_id, 'approve_full_run')``
+    after a reviewed dry-run sample, then retry the full run.
+    """
+
+    exit_code = 4
+    code = 'approval_required'
+
+    def __init__(self, run_id: str, message: str | None = None):
+        self.run_id = run_id
+        super().__init__(
+            message
+            or (
+                f"full-run refused for {run_id}: approval_required. "
+                f"Review a dry-run sample, then approve (dashboard control or "
+                f"post_control({run_id!r}, 'approve_full_run')) and retry."
+            )
+        )
+
+
 def _install_signal_handlers() -> None:
     """Close open runs on SIGTERM/SIGINT so ledgers get a terminal event.
 
@@ -695,6 +718,62 @@ def _approve_control_cutoff(scope: str) -> str:
     return cutoff
 
 
+def predicted_run_id(name: str, lock_key: str | None = None,
+                     source: str | None = None) -> str:
+    """Dashboard run id ``runguard:<lane>`` for a not-yet-started observed run.
+
+    Use this to post ``approve_full_run`` after a dry-run sample before starting
+    the full run (or to query controls for a lane).
+    """
+    if source is not None and lock_key is not None:
+        raise ValueError('pass source= for a source-derived scope, not both source and lock_key')
+    scope = source_scope(name, source) if source is not None else (lock_key or name)
+    return f'runguard:{_lane_slug(scope)}'
+
+
+def _acked_control_ids(scope: str) -> set[str]:
+    return {
+        str(event['control_id']) for event in _iter_jsonl(_lane_path(scope))
+        if event.get('event') == 'control_acknowledged' and event.get('control_id')
+    }
+
+
+def pending_full_run_approvals(run_id: str, scope: str | None = None) -> list[dict]:
+    """Valid, unacked ``approve_full_run`` controls for a run/lane.
+
+    Approvals older than the last completed non-dry terminal event are expired.
+    """
+    if scope is None:
+        lane = _lane_from_run_id(run_id)
+        scope = lane or str(run_id)
+    cutoff = _approve_control_cutoff(scope)
+    acked = _acked_control_ids(scope)
+    pending: list[dict] = []
+    for control in read_controls(run_id):
+        if control.get('kind') != 'approve_full_run':
+            continue
+        control_id = str(control.get('id') or _canonical_hash(control))
+        if control_id in acked:
+            continue
+        control_ts = str(control.get('ts') or '')
+        if (cutoff and control_ts
+                and _ts_order_key(control_ts) <= _ts_order_key(cutoff)):
+            continue
+        pending.append(control)
+    return pending
+
+
+def _env_require_approval() -> bool:
+    """Default full-run approval gate. Opt out with OBSERVER_ALLOW_UNAPPROVED_FULL_RUN=1."""
+    raw = os.environ.get('OBSERVER_ALLOW_UNAPPROVED_FULL_RUN', '').strip().lower()
+    if raw in {'1', 'true', 'yes', 'on'}:
+        return False
+    raw_req = os.environ.get('OBSERVER_REQUIRE_FULL_RUN_APPROVAL', '').strip().lower()
+    if raw_req in {'0', 'false', 'no', 'off'}:
+        return False
+    return True
+
+
 def _lockfile(name: str) -> str:
     return _state_path(name, '.lock', 'scope')
 
@@ -991,7 +1070,8 @@ class ObservedRun:
                  source: str | None = None, input_snapshot: dict | None = None,
                  destination: str | None = None, transform_version: str | None = None,
                  policy_version: str | None = None, script: str | None = None,
-                 config: object | None = None, **fields):
+                 config: object | None = None, require_approval: bool | None = None,
+                 **fields):
         self.name = name
         if source is not None and lock_key is not None:
             raise ValueError('pass source= for a source-derived scope, not both source and lock_key')
@@ -1021,6 +1101,23 @@ class ObservedRun:
         self._schema_samples: dict[str, int] = {}
         self.stop_requested = False
         self.closed = False
+        # Machine-enforced full-run gate: refuse before lock when no approval.
+        # Opt out: require_approval=False or OBSERVER_ALLOW_UNAPPROVED_FULL_RUN=1.
+        if require_approval is None:
+            require_approval = (not self.dry_run) and _env_require_approval()
+        self._require_approval = bool(require_approval) and not self.dry_run
+        predicted = predicted_run_id(name, lock_key=lock_key, source=source)
+        if self._require_approval:
+            pending = pending_full_run_approvals(predicted, self.scope)
+            if not pending:
+                # Also accept bare-lane controls written under runguard: or scope name.
+                alt_ids = {predicted, f'runguard:{_lane_slug(self.scope)}', self.scope}
+                for alt in alt_ids:
+                    pending = pending_full_run_approvals(alt, self.scope)
+                    if pending:
+                        break
+            if not pending:
+                raise ApprovalRequired(predicted)
         acquire_lock(self.lock_key)
         started = dict(fields)
         started.update({'name': self.name, 'dry_run': self.dry_run, 'attempt': self.attempt})
@@ -1028,7 +1125,14 @@ class ObservedRun:
             started['source'] = source
         if description:
             started['description'] = description
+        if self._require_approval:
+            started['approval_required'] = True
+            started['approval_present'] = True
         ledger(self.scope, 'run_started', **started)
+        if self.dry_run:
+            ledger(self.scope, 'sample_started', attempt=self.attempt, dry_run=True)
+        else:
+            ledger(self.scope, 'full_run_started', attempt=self.attempt, dry_run=False)
         self.run_id = current_run_id(self.scope)
         # A control is a one-shot request for this ledger lane. Persisted
         # acknowledgements prevent a recovered/retried process from re-applying
@@ -1125,6 +1229,9 @@ class ObservedRun:
         if self.closed:
             return
         self._consume_pending_approvals('consumed by completed full run')
+        if self.dry_run:
+            self._event('sample_finished', status='success', dry_run=True,
+                        **self._terminal_payload(**fields))
         self._event('run_finished', status='success', dry_run=self.dry_run,
                     **self._terminal_payload(**fields))
         release_lock(self.lock_key)
@@ -1134,6 +1241,9 @@ class ObservedRun:
         if self.closed:
             return
         self._consume_pending_approvals('consumed by failed full run')
+        if self.dry_run:
+            self._event('sample_finished', status='failed', dry_run=True,
+                        error=str(error), **self._terminal_payload(**fields))
         self._event('run_failed', status='failed', error=str(error),
                     dry_run=self.dry_run, **self._terminal_payload(**fields))
         release_lock(self.lock_key)
@@ -1611,10 +1721,18 @@ class ObservedRun:
 def start_observed_run(name: str, lock_key: str | None = None,
                        dry_run: bool = False, description: str | None = None,
                        source: str | None = None,
+                       require_approval: bool | None = None,
                        **fields) -> ObservedRun:
-    """Start the boring default contract: lock, run id, ledger, dry-run state."""
+    """Start the boring default contract: lock, run id, ledger, dry-run state.
+
+    When ``dry_run=False``, a valid unacked ``approve_full_run`` control is
+    required by default (raises ``ApprovalRequired``, exit code 4). Opt out with
+    ``require_approval=False`` or ``OBSERVER_ALLOW_UNAPPROVED_FULL_RUN=1`` for
+    tests and power users.
+    """
     return ObservedRun(name=name, lock_key=lock_key, dry_run=dry_run,
-                       description=description, source=source, **fields)
+                       description=description, source=source,
+                       require_approval=require_approval, **fields)
 
 
 

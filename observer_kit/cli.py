@@ -175,6 +175,7 @@ def cmd_test(args: argparse.Namespace) -> int:
         [sys.executable, "-B", str(tests_dir / "test_dashboard_browser.py")],
         [sys.executable, "-B", str(tests_dir / "test_cli.py")],
         [sys.executable, "-B", str(tests_dir / "test_axi.py")],
+        [sys.executable, "-B", str(tests_dir / "test_agent_acceptance.py")],
         [sys.executable, "-B", str(tests_dir / "test_gate.py")],
     ]
     if flow_skill_dir.is_dir():
@@ -768,12 +769,61 @@ def _start_watcher(state_dir: Path, run_id: str) -> subprocess.Popen:
     )
 
 
+def _lint_workflow_scripts(command: list[str]) -> int:
+    """Lint Python workflow scripts in a run command; return lint exit code."""
+    lint_script = package_file("lint_emit.py")
+    scripts: list[Path] = []
+    for i, tok in enumerate(command):
+        # Common shapes: python3 workflow.py … / path/to/workflow.py
+        if tok.endswith(".py") and not tok.startswith("-"):
+            candidate = Path(tok).expanduser()
+            if candidate.is_file():
+                scripts.append(candidate.resolve())
+                continue
+        if tok in {"python", "python3", sys.executable} and i + 1 < len(command):
+            nxt = command[i + 1]
+            if nxt.endswith(".py") and not nxt.startswith("-"):
+                candidate = Path(nxt).expanduser()
+                if candidate.is_file():
+                    scripts.append(candidate.resolve())
+    # Deduplicate
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for path in scripts:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(path)
+    for script in unique:
+        print(f"[observer] lint {script}", flush=True)
+        rc = subprocess.call([sys.executable, "-B", str(lint_script), str(script)])
+        if rc:
+            print(
+                f"[observer] lint failed for {script} (rc={rc}). "
+                "Fix findings or pass --no-lint / OBSERVER_NO_LINT=1 to skip.",
+                file=sys.stderr,
+                flush=True,
+            )
+            return rc
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     command = list(args.command)
     if command and command[0] == "--":
         command = command[1:]
     if not command:
         raise SystemExit("usage: observer-kit run [options] -- <command> [args...]")
+
+    # Lint as hard gate (opt-out): agents skip optional lint under time pressure.
+    no_lint = bool(getattr(args, "no_lint", False)) or os.environ.get(
+        "OBSERVER_NO_LINT", ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    if not no_lint:
+        lint_rc = _lint_workflow_scripts(command)
+        if lint_rc:
+            return lint_rc
 
     state_dir = Path(args.state_dir).expanduser().resolve()
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -1251,6 +1301,8 @@ def cmd_stop(args: argparse.Namespace) -> int:
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
+    from observer_kit import detect_install_skew, version_info
+
     project = Path(args.project).expanduser().resolve()
     checks = []
     checks.append(("project exists", project.exists()))
@@ -1274,6 +1326,23 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         ok = ok and passed
         print(f"{'OK ' if passed else 'ERR'} {label}")
 
+    ver = version_info()
+    print(f"OK  package version {ver['version']} sha={ver['git_sha']}")
+    print(f"    package path {ver['package_path']}")
+
+    skew = detect_install_skew()
+    if skew.get("install_skew"):
+        print()
+        print(f"WARN install_skew: true — {skew.get('reason')}")
+        print(f"    PATH binary: {skew.get('path_binary')} version={skew.get('path_version')}")
+        print(f"    package:     {skew.get('package_version')} @ {skew.get('package_path')}")
+        print(f"    upgrade:     {skew.get('upgrade')}")
+        print("    canonical probe: observer-kit axi help")
+        print("                     python3 -m observer_kit axi help")
+        # Flag skew for agents without failing substrate checks (reinstall is separate).
+    else:
+        print("OK  install_skew: false")
+
     # Deprecated vendored copies: warn but do not fail.
     vendored = []
     if (project / "runguard.py").exists():
@@ -1295,7 +1364,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if not ok:
         print()
         print(f"Run: observer-kit init {project}")
-        print("And: python -m pip install -e .   # package provides runtime")
+        print(f"And: {skew.get('upgrade') or 'python -m pip install -e .'}")
         return 1
     return 0
 
@@ -1304,8 +1373,6 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 def cmd_axi(args: argparse.Namespace) -> int:
     """Agent-ergonomic surface: TOON stdout, next-step help, no interactive prompts."""
-    from observer_kit import axi as axi_mod
-
     action = getattr(args, "axi_command", None) or "home"
     state_dir = Path(getattr(args, "state_dir", ".observer") or ".observer")
     state_dir = state_dir.expanduser().resolve()
@@ -1315,7 +1382,26 @@ def cmd_axi(args: argparse.Namespace) -> int:
     if action == "runs":
         return _axi_runs(state_dir)
     if action == "run":
-        return _axi_run_detail(state_dir, getattr(args, "id", None) or getattr(args, "run_id", None))
+        return _axi_run_detail(
+            state_dir, getattr(args, "id", None) or getattr(args, "run_id", None)
+        )
+    if action == "attention":
+        return _axi_attention(
+            state_dir,
+            getattr(args, "id", None),
+            limit=int(getattr(args, "limit", 20) or 20),
+        )
+    if action == "sample-status":
+        return _axi_sample_status(state_dir, getattr(args, "id", None))
+    if action == "controls":
+        return _axi_controls(state_dir, getattr(args, "id", None))
+    if action == "chat":
+        return _axi_chat(
+            state_dir,
+            getattr(args, "id", None),
+            since=getattr(args, "since", None),
+            limit=int(getattr(args, "limit", 50) or 50),
+        )
     if action == "doctor":
         return _axi_doctor(
             Path(getattr(args, "project", ".") or "."),
@@ -1326,7 +1412,7 @@ def cmd_axi(args: argparse.Namespace) -> int:
     if action == "help":
         return _axi_help()
     # Unknown subcommand should not reach here (argparse), but fail loud.
-    from observer_kit.axi import emit, toon_kv, toon_help
+    from observer_kit.axi import emit, toon_help, toon_kv
     emit(
         toon_kv("error", f"unknown axi command: {action}"),
         toon_help(["observer-kit axi help"]),
@@ -1335,7 +1421,9 @@ def cmd_axi(args: argparse.Namespace) -> int:
 
 
 def _axi_home(state_dir: Path, *, port: int = 8484) -> int:
+    from observer_kit import detect_install_skew, version_info
     from observer_kit.axi import (
+        AXI_SCHEMA,
         default_help,
         emit,
         list_runs,
@@ -1347,30 +1435,49 @@ def _axi_home(state_dir: Path, *, port: int = 8484) -> int:
 
     runs = list_runs(state_dir) if state_dir.is_dir() else []
     live_runs = [r for r in runs if r.get("live")]
-    dashboards = _dashboard_records([state_dir] if state_dir.is_dir() else None, scan_ports=True)
+    dashboards = _dashboard_records(
+        [state_dir] if state_dir.is_dir() else None, scan_ports=True
+    )
     watchers = _watcher_records(state_dir) if state_dir.is_dir() else []
     orphans = sum(1 for r in dashboards + watchers if r.get("orphan"))
     dash = probe_dashboard(port)
     if dash is None:
-        # try first live dashboard from inventory
         for rec in dashboards:
             if rec.get("pid_alive") and rec.get("port"):
-                dash = {"port": rec.get("port"), "state_dir": rec.get("state_dir"),
-                        "pid": rec.get("pid")}
+                dash = {
+                    "port": rec.get("port"),
+                    "state_dir": rec.get("state_dir"),
+                    "pid": rec.get("pid"),
+                }
                 break
 
+    ver = version_info()
+    skew = detect_install_skew()
     blocks = [
         toon_kv("surface", "observer-axi"),
-        toon_kv("state_dir", str(state_dir) if state_dir.is_dir() else f"missing:{state_dir}"),
+        toon_kv("axi_schema", AXI_SCHEMA),
+        toon_kv("version", ver["version"]),
+        toon_kv("git_sha", ver["git_sha"]),
+        toon_kv(
+            "state_dir",
+            str(state_dir) if state_dir.is_dir() else f"missing:{state_dir}",
+        ),
         toon_kv("state_ok", state_dir.is_dir()),
         toon_kv("runs", len(runs)),
         toon_kv("live", len(live_runs)),
         toon_kv("orphans", orphans),
+        toon_kv("install_skew", bool(skew.get("install_skew"))),
         toon_kv(
             "dashboard",
-            f"http://127.0.0.1:{dash.get('port')}/" if dash and dash.get("port") else "none",
+            f"http://127.0.0.1:{dash.get('port')}/"
+            if dash and dash.get("port")
+            else "none",
         ),
     ]
+    if skew.get("install_skew"):
+        blocks.append(toon_kv("skew_reason", skew.get("reason") or "path/package mismatch"))
+        blocks.append(toon_kv("upgrade", skew.get("upgrade") or "python3 -m pip install -e ."))
+
     if live_runs:
         blocks.append(
             toon_table(
@@ -1388,18 +1495,34 @@ def _axi_home(state_dir: Path, *, port: int = 8484) -> int:
             )
         )
     else:
-        blocks.append(toon_kv("runs_note", "0 runs in state dir"))
+        # Definitive empty state (not prose "No runs.")
+        blocks.append(toon_table("recent_runs", [], ["id", "live", "status", "records", "desc"]))
 
     if orphans:
         blocks.append(toon_kv("orphan_note", f"{orphans} orphan process(es)"))
 
-    helps = default_help(str(state_dir), live=len(live_runs), orphans=orphans)
+    live_id = live_runs[0]["id"] if live_runs else None
+    helps = default_help(
+        str(state_dir), live=len(live_runs), orphans=orphans
+    )
+    # real_help_commands accepts run_id via kwargs through default_help only if we pass it —
+    # inject live run id for copy-pastable poll when live.
+    if live_id:
+        from observer_kit.axi import real_help_commands
+        helps = real_help_commands(
+            str(state_dir), live=len(live_runs), orphans=orphans, run_id=live_id
+        )
     if not state_dir.is_dir():
         helps = [
             f"observer-kit init . --state-dir {state_dir.name}",
-            "python -m pip install -e .",
+            skew.get("upgrade") or "python3 -m pip install -e .",
             "observer-kit axi doctor .",
         ]
+    if skew.get("install_skew"):
+        helps = [str(skew.get("upgrade") or "python3 -m pip install -e .")] + [
+            h for h in helps if "pip install" not in h
+        ]
+        helps.append("python3 -m observer_kit axi help")
     blocks.append(toon_help(helps))
     emit(*blocks)
     return 0 if state_dir.is_dir() else 1
@@ -1410,7 +1533,8 @@ def _axi_runs(state_dir: Path) -> int:
 
     if not state_dir.is_dir():
         emit(
-            toon_kv("error", f"state dir missing: {state_dir}"),
+            toon_kv("error", "state_dir_missing"),
+            toon_kv("state_dir", str(state_dir)),
             toon_help([f"observer-kit init . --state-dir {state_dir.name}"]),
         )
         return 1
@@ -1418,54 +1542,233 @@ def _axi_runs(state_dir: Path) -> int:
     emit(
         toon_kv("state_dir", str(state_dir)),
         toon_kv("count", len(runs)),
-        toon_table(runs and "runs" or "runs", runs, ["id", "live", "status", "records", "desc"]),
+        toon_table("runs", runs, ["id", "live", "status", "records", "desc"]),
         toon_help(default_help(str(state_dir), live=sum(1 for r in runs if r.get("live")))),
     )
     return 0
 
 
 def _axi_run_detail(state_dir: Path, run_id: str | None) -> int:
-    from observer_kit.axi import emit, get_run, toon_help, toon_kv
+    from observer_kit.axi import (
+        emit,
+        real_help_commands,
+        run_detail,
+        toon_help,
+        toon_kv,
+        toon_table,
+    )
 
     if not run_id:
         emit(
-            toon_kv("error", "run id required"),
+            toon_kv("error", "run_id_required"),
+            toon_kv("state_dir", str(state_dir)),
             toon_help([f"observer-kit axi runs --state-dir {state_dir}"]),
         )
         return 2
     if not state_dir.is_dir():
-        emit(toon_kv("error", f"state dir missing: {state_dir}"))
-        return 1
-    run = get_run(state_dir, run_id)
-    if not run:
         emit(
-            toon_kv("error", f"run not found: {run_id}"),
+            toon_kv("error", "state_dir_missing"),
+            toon_kv("state_dir", str(state_dir)),
+        )
+        return 1
+    detail = run_detail(state_dir, run_id)
+    if not detail:
+        emit(
+            toon_kv("error", "run_not_found"),
+            toon_kv("run", run_id),
             toon_kv("state_dir", str(state_dir)),
             toon_help([f"observer-kit axi runs --state-dir {state_dir}"]),
         )
         return 1
+    attention = detail.get("attention") or []
+    blocks = [
+        toon_kv("state_dir", str(state_dir)),
+        toon_kv("id", detail["id"]),
+        toon_kv("lane", detail["lane"]),
+        toon_kv("live", detail["live"]),
+        toon_kv("status", detail["status"]),
+        toon_kv("records", detail["records"]),
+        toon_kv("error_count", detail.get("error_count") or 0),
+        toon_kv("last_event", detail.get("last_event") or "none"),
+        toon_kv("desc", detail["desc"]),
+        toon_kv("mtime", detail["mtime"]),
+        toon_kv("dry_run", detail.get("dry_run")),
+        toon_kv("sample_finished", bool(detail.get("sample_finished"))),
+        toon_kv("full_run_started", bool(detail.get("full_run_started"))),
+        toon_kv("lock_pid", detail.get("lock_pid")),
+        toon_kv("lock_alive", bool(detail.get("lock_alive"))),
+        toon_kv("pending_writes", detail.get("pending_writes") or 0),
+        toon_kv("unreceipted_intents", detail.get("unreceipted_intents") or 0),
+        toon_table("attention", attention, ["key", "error"]),
+        toon_help(
+            real_help_commands(
+                str(state_dir),
+                live=1 if detail.get("live") else 0,
+                run_id=detail["id"],
+            )
+        ),
+    ]
+    if detail.get("status") == "unknown" and detail.get("status_reason"):
+        blocks.insert(5, toon_kv("status_reason", detail["status_reason"]))
+    emit(*blocks)
+    return 0
+
+
+def _axi_attention(state_dir: Path, run_id: str | None, *, limit: int = 20) -> int:
+    from observer_kit.axi import (
+        attention_rows,
+        emit,
+        get_run,
+        toon_help,
+        toon_kv,
+        toon_table,
+    )
+
+    if not run_id:
+        emit(
+            toon_kv("error", "run_id_required"),
+            toon_help([f"observer-kit axi runs --state-dir {state_dir}"]),
+        )
+        return 2
+    if not state_dir.is_dir():
+        emit(toon_kv("error", "state_dir_missing"), toon_kv("state_dir", str(state_dir)))
+        return 1
+    run = get_run(state_dir, run_id)
+    if not run:
+        emit(
+            toon_kv("error", "run_not_found"),
+            toon_kv("run", run_id),
+            toon_help([f"observer-kit axi runs --state-dir {state_dir}"]),
+        )
+        return 1
+    path = Path(str(run.get("events_path") or ""))
+    rows = attention_rows(path, limit=limit) if path.is_file() else []
     emit(
+        toon_kv("state_dir", str(state_dir)),
         toon_kv("id", run["id"]),
-        toon_kv("lane", run["lane"]),
-        toon_kv("live", run["live"]),
-        toon_kv("status", run["status"]),
-        toon_kv("records", run["records"]),
-        toon_kv("desc", run["desc"]),
-        toon_kv("mtime", run["mtime"]),
+        toon_kv("count", len(rows)),
+        toon_table("attention", rows, ["key", "error"]),
         toon_help([
+            f"observer-kit axi run --state-dir {state_dir} --id {run['id']}",
             f"observer-kit poll {state_dir} --run {run['id']}",
+        ]),
+    )
+    return 0
+
+
+def _axi_sample_status(state_dir: Path, run_id: str | None) -> int:
+    from observer_kit.axi import emit, sample_status, toon_help, toon_kv, toon_table
+
+    if not run_id:
+        emit(
+            toon_kv("error", "run_id_required"),
+            toon_help([f"observer-kit axi runs --state-dir {state_dir}"]),
+        )
+        return 2
+    if not state_dir.is_dir():
+        emit(toon_kv("error", "state_dir_missing"), toon_kv("state_dir", str(state_dir)))
+        return 1
+    status = sample_status(state_dir, run_id)
+    if not status:
+        emit(
+            toon_kv("error", "run_not_found"),
+            toon_kv("run", run_id),
+            toon_help([f"observer-kit axi runs --state-dir {state_dir}"]),
+        )
+        return 1
+    outcome_rows = [
+        {"status": k, "count": v} for k, v in sorted((status.get("outcomes") or {}).items())
+    ]
+    emit(
+        toon_kv("state_dir", str(state_dir)),
+        toon_kv("id", status["id"]),
+        toon_kv("status", status["status"]),
+        toon_kv("dry_run_started", status["dry_run_started"]),
+        toon_kv("sample_finished", status["sample_finished"]),
+        toon_kv("approval_recorded", status["approval_recorded"]),
+        toon_kv("approval_pending", status["approval_pending"]),
+        toon_kv("records", status["records"]),
+        toon_table("outcomes", outcome_rows, ["status", "count"]),
+        toon_help([
+            f"observer-kit axi run --state-dir {state_dir} --id {status['id']}",
             f"observer-kit dashboard {state_dir}",
-            f"observer-kit axi runs --state-dir {state_dir}",
+        ]),
+    )
+    return 0
+
+
+def _axi_controls(state_dir: Path, run_id: str | None) -> int:
+    from observer_kit.axi import emit, get_run, list_controls, toon_help, toon_kv, toon_table
+
+    if not run_id:
+        emit(
+            toon_kv("error", "run_id_required"),
+            toon_help([f"observer-kit axi runs --state-dir {state_dir}"]),
+        )
+        return 2
+    if not state_dir.is_dir():
+        emit(toon_kv("error", "state_dir_missing"), toon_kv("state_dir", str(state_dir)))
+        return 1
+    run = get_run(state_dir, run_id)
+    if not run:
+        emit(
+            toon_kv("error", "run_not_found"),
+            toon_kv("run", run_id),
+            toon_help([f"observer-kit axi runs --state-dir {state_dir}"]),
+        )
+        return 1
+    rows = list_controls(state_dir, run_id)
+    pending = [r for r in rows if not r.get("acked")]
+    emit(
+        toon_kv("state_dir", str(state_dir)),
+        toon_kv("id", run["id"]),
+        toon_kv("pending", len(pending)),
+        toon_table("controls", rows, ["id", "kind", "acked", "ts", "note"]),
+        toon_help([
+            f"observer-kit axi run --state-dir {state_dir} --id {run['id']}",
+            f"observer-kit dashboard {state_dir}",
+        ]),
+    )
+    return 0
+
+
+def _axi_chat(state_dir: Path, run_id: str | None, *, since: str | None = None,
+              limit: int = 50) -> int:
+    from observer_kit.axi import emit, get_run, list_chat, toon_help, toon_kv, toon_table
+
+    if not run_id:
+        emit(
+            toon_kv("error", "run_id_required"),
+            toon_help([f"observer-kit axi runs --state-dir {state_dir}"]),
+        )
+        return 2
+    if not state_dir.is_dir():
+        emit(toon_kv("error", "state_dir_missing"), toon_kv("state_dir", str(state_dir)))
+        return 1
+    run = get_run(state_dir, run_id)
+    rid = run["id"] if run else run_id
+    rows = list_chat(state_dir, rid, since=since, limit=limit)
+    emit(
+        toon_kv("state_dir", str(state_dir)),
+        toon_kv("id", rid),
+        toon_kv("count", len(rows)),
+        toon_table("chat", rows, ["ts", "author", "kind", "anchor", "text"]),
+        toon_help([
+            f"observer-kit poll {state_dir} --run {rid}",
+            f"observer-kit reply {state_dir} --run {rid} --text \"...\"",
         ]),
     )
     return 0
 
 
 def _axi_doctor(project: Path, state_name: str) -> int:
+    from observer_kit import detect_install_skew, version_info
     from observer_kit.axi import emit, toon_help, toon_kv, toon_table
 
     project = project.expanduser().resolve()
     state = project / state_name
+    ver = version_info()
+    skew = detect_install_skew()
     checks = [
         {"check": "project_exists", "ok": project.exists()},
         {"check": "package_runguard", "ok": package_file("runguard.py").exists()},
@@ -1477,19 +1780,26 @@ def _axi_doctor(project: Path, state_name: str) -> int:
         {"check": "runs_home", "ok": (state / "runs").is_dir()},
     ]
     ok = all(c["ok"] for c in checks)
+    helps = (
+        [f"observer-kit init {project}", str(skew.get("upgrade") or "python -m pip install -e .")]
+        if not ok
+        else [
+            f"observer-kit axi --state-dir {state}",
+            f"observer-kit dashboard {state}",
+        ]
+    )
+    if skew.get("install_skew"):
+        helps = [str(skew.get("upgrade")), "python3 -m observer_kit axi help"] + list(helps)
     emit(
         toon_kv("project", str(project)),
         toon_kv("state_dir", str(state)),
+        toon_kv("version", ver["version"]),
+        toon_kv("git_sha", ver["git_sha"]),
+        toon_kv("install_skew", bool(skew.get("install_skew"))),
+        toon_kv("upgrade", skew.get("upgrade") or ""),
         toon_kv("ok", ok),
         toon_table("checks", checks, ["check", "ok"]),
-        toon_help(
-            [f"observer-kit init {project}", "python -m pip install -e ."]
-            if not ok
-            else [
-                f"observer-kit axi --state-dir {state}",
-                f"observer-kit dashboard {state}",
-            ]
-        ),
+        toon_help(helps),
     )
     return 0 if ok else 1
 
@@ -1504,65 +1814,217 @@ def _axi_ps(state_dir: Path, *, scan: bool) -> int:
         {
             "port": d.get("port"),
             "pid": d.get("pid"),
+            "parent_alive": (
+                _pid_alive(d.get("parent_pid")) if d.get("parent_pid") is not None else True
+            ),
             "orphan": bool(d.get("orphan")),
-            "state": d.get("state_dir"),
+            "state_dir": d.get("state_dir"),
         }
         for d in dashboards
     ]
     watch_rows = [
         {
             "pid": w.get("pid"),
+            "parent_alive": (
+                _pid_alive(w.get("parent_pid")) if w.get("parent_pid") is not None else True
+            ),
             "orphan": bool(w.get("orphan")),
             "target": "all" if w.get("mode") == "all" else w.get("run"),
-            "state": w.get("state_dir"),
+            "state_dir": w.get("state_dir"),
         }
         for w in watchers
     ]
     orphans = sum(1 for r in dash_rows + watch_rows if r.get("orphan"))
     emit(
+        toon_kv("state_dir", str(state_dir)),
         toon_kv("dashboards", len(dash_rows)),
         toon_kv("watchers", len(watch_rows)),
         toon_kv("orphans", orphans),
-        toon_table("dashboard", dash_rows, ["port", "pid", "orphan", "state"])
-        if dash_rows
-        else toon_kv("dashboard_note", "0 dashboards"),
-        toon_table("watcher", watch_rows, ["pid", "orphan", "target", "state"])
-        if watch_rows
-        else toon_kv("watcher_note", "0 watchers"),
+        toon_table(
+            "dashboard",
+            dash_rows,
+            ["port", "pid", "parent_alive", "orphan", "state_dir"],
+        ),
+        toon_table(
+            "watcher",
+            watch_rows,
+            ["pid", "parent_alive", "orphan", "target", "state_dir"],
+        ),
         toon_help(
             [f"observer-kit stop --sweep {state_dir}"]
             if orphans
-            else [f"observer-kit axi --state-dir {state_dir}", f"observer-kit dashboard {state_dir}"]
+            else [
+                f"observer-kit axi --state-dir {state_dir}",
+                f"observer-kit dashboard {state_dir}",
+            ]
         ),
     )
     return 0
 
 
 def _axi_help() -> int:
-    from observer_kit.axi import emit, toon_help, toon_kv
+    from observer_kit import detect_install_skew, version_info
+    from observer_kit.axi import AXI_SCHEMA, axi_help_catalog, emit, toon_help, toon_kv
 
-    emit(
+    ver = version_info()
+    skew = detect_install_skew()
+    blocks = [
         toon_kv("surface", "observer-axi"),
+        toon_kv("axi_schema", AXI_SCHEMA),
+        toon_kv("version", ver["version"]),
+        toon_kv("git_sha", ver["git_sha"]),
         toon_kv("desc", "Agent eXperience Interface for Observer Kit"),
-        toon_help([
-            "observer-kit axi [--state-dir .observer]",
-            "observer-kit axi runs --state-dir .observer",
-            "observer-kit axi run --state-dir .observer --id runguard:<lane>",
-            "observer-kit axi doctor .",
-            "observer-kit axi ps --state-dir .observer",
-            "observer-kit poll .observer --all",
-            "observer-kit stop --sweep .observer",
-        ]),
-    )
+        toon_kv("install_skew", bool(skew.get("install_skew"))),
+        toon_help(axi_help_catalog()),
+    ]
+    if skew.get("install_skew"):
+        blocks.insert(-1, toon_kv("upgrade", skew.get("upgrade") or ""))
+        blocks.insert(-1, toon_kv("skew_reason", skew.get("reason") or ""))
+    emit(*blocks)
+    return 0
+
+
+def cmd_scaffold(args: argparse.Namespace) -> int:
+    """Emit a minimal workflow.py + EXPLAIN seed agents can fill in."""
+    dest = Path(args.dest).expanduser().resolve()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    source = args.source or "source-id"
+    key = args.key or "id"
+    name = args.name or "workflow"
+    paid = bool(getattr(args, "paid_provider", False))
+    external = bool(getattr(args, "external_destination", False))
+    body = f'''#!/usr/bin/env python3
+"""Scaffolded Observer Kit workflow — fill source/transform/destination.
+
+Operate mode: axi home → sample dry-run → review → approve → full-run.
+Design mode: see pattern.md + EXPLAIN.md for locks, receipts, resume.
+"""
+from __future__ import annotations
+
+import argparse
+from observer_kit.runguard import (
+    ApprovalRequired, RunPaused, input_snapshot, start_observed_run,
+)
+
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    mode = p.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--full-run", action="store_true")
+    p.add_argument("--limit", type=int, default=10)
+    return p.parse_args()
+
+
+def load_rows(limit: int | None):
+    # TODO: load from {source!r}; key field {key!r}
+    rows = [{{"{key}": "example-1", "name": "Example"}}]
+    if limit is not None:
+        rows = rows[: max(0, limit)]
+    return rows
+
+
+def transform(row: dict) -> dict:
+    # TODO: call provider / map fields
+    {"# throttle('provider-account', 5)  # paid provider — share one resource key" if paid else "# no paid provider flag"}
+    return {{"name": row.get("name"), "status": "ok"}}
+
+
+def main() -> int:
+    args = parse_args()
+    rows = load_rows(args.limit if args.dry_run else None)
+    source = {source!r}
+    try:
+        run = start_observed_run(
+            {name!r},
+            source=source,
+            input_snapshot=input_snapshot(source, records=rows),
+            dry_run=args.dry_run,
+            description="scaffolded workflow",
+            todo=len(rows),
+            progress_table="records",
+            summary_metrics=[
+                {{"key": "processed", "label": "processed"}},
+            ],
+        )
+    except ApprovalRequired as exc:
+        print(f"error: approval_required")
+        print(f"  run: {{exc.run_id}}")
+        return 4
+    try:
+        run.preview(rows[:5], estimates={{"writes": len(rows)}})
+        for row in rows:
+            run.check_controls()
+            key = str(row[{key!r}])
+            with run.step("transform", table="records", key=key, label=row.get("name")):
+                result = transform(row)
+                ticket = run.write_intent(key, payload=result)
+                if run.dry_run:
+                    from observer_kit.runguard import ledger
+                    ledger(run.scope, "record", table="records", key=key,
+                           **result, status="preview")
+                elif ticket:
+                    # TODO: durable sink write, then receipt
+                    {"# external destination — write then fsync before receipt" if external else "# write to destination, then:"}
+                    run.write_receipt(ticket, destination_id=key, verified=True,
+                                      record_table="records", outcome="written",
+                                      record_fields=result)
+                run.count("processed")
+                run.checkpoint("last_record", key)
+            run.check_controls(after_record=True)
+        run.success()
+        return 0
+    except RunPaused:
+        raise
+    except Exception as exc:
+        run.fail(exc)
+        raise
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+    if dest.exists() and not args.force:
+        print(f"skip existing {dest} (pass --force to overwrite)")
+        return 1
+    dest.write_text(body, encoding="utf-8")
+    print(f"wrote {dest}")
+    explain = dest.parent / "EXPLAIN.md"
+    if not explain.exists() or args.force:
+        try:
+            src = package_file("EXPLAIN.md")
+            explain.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+            print(f"wrote {explain}")
+        except SystemExit:
+            explain.write_text(
+                f"# {name}\n\nSource: {source}\nKey: {key}\n",
+                encoding="utf-8",
+            )
+            print(f"wrote {explain}")
+    print()
+    print("Minimum harness checklist:")
+    print("  lock → schema_sample → dry-run limit → emit after persist →")
+    print("  checkpoint → approval → full-run")
+    print()
+    print("Next:")
+    print(f"  observer-kit lint {dest}")
+    print(f"  observer-kit run --state-dir .observer -- python3 {dest} --dry-run --limit 5")
+    print("  # review dashboard → Approve full run →")
+    print(f"  observer-kit run --state-dir .observer -- python3 {dest} --full-run")
     return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="observer-kit",
-        description="Initialize and run Observer Kit guardrails for risky batch scripts.",
+        description=(
+            "Agents: use observer-kit axi help. Humans: observer-kit dashboard.\n"
+            "Initialize and run Observer Kit guardrails for risky batch scripts."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
+  observer-kit axi help
+  observer-kit axi --state-dir .observer
   observer-kit init .
   observer-kit dashboard .observer
   observer-kit poll .observer --run runguard:my-run
@@ -1571,12 +2033,18 @@ def build_parser() -> argparse.ArgumentParser:
   observer-kit ps .observer
   observer-kit stop --sweep .observer
   observer-kit validate-flow pipeline.flow.json
-  observer-kit axi --state-dir .observer
-  observer-kit axi runs --state-dir .observer
+  observer-kit scaffold workflow --dest workflow.py --source sheet:leads
   observer-kit test
+
+exit codes: 0 ok | 1 not found/failed check | 2 usage | 3 lock | 4 approval | 130 interrupt
 """,
     )
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument(
+        "--version",
+        action="store_true",
+        help="print package version + git sha and exit",
+    )
+    sub = parser.add_subparsers(dest="command", required=False)
 
     axi = sub.add_parser(
         "axi",
@@ -1589,6 +2057,8 @@ examples:
   observer-kit axi --state-dir .observer
   observer-kit axi runs --state-dir .observer
   observer-kit axi run --state-dir .observer --id runguard:my-lane
+  observer-kit axi attention --state-dir .observer --id runguard:my-lane
+  observer-kit axi sample-status --state-dir .observer --id runguard:my-lane
   observer-kit axi doctor .
   observer-kit axi ps --state-dir .observer
   observer-kit axi help
@@ -1621,6 +2091,31 @@ Human visual review stays on the dashboard:
     axi_run.add_argument("--state-dir", default=".observer")
     axi_run.add_argument("--id", dest="id", required=True, help="run id, e.g. runguard:lane")
     axi_run.set_defaults(axi_command="run")
+
+    axi_att = axi_sub.add_parser("attention", help="rows with non-empty error")
+    axi_att.add_argument("--state-dir", default=".observer")
+    axi_att.add_argument("--id", dest="id", required=True)
+    axi_att.add_argument("--limit", type=int, default=20)
+    axi_att.set_defaults(axi_command="attention")
+
+    axi_sample = axi_sub.add_parser(
+        "sample-status", help="dry-run / approval readiness for a run"
+    )
+    axi_sample.add_argument("--state-dir", default=".observer")
+    axi_sample.add_argument("--id", dest="id", required=True)
+    axi_sample.set_defaults(axi_command="sample-status")
+
+    axi_ctrl = axi_sub.add_parser("controls", help="pending pause/stop/approve + ack state")
+    axi_ctrl.add_argument("--state-dir", default=".observer")
+    axi_ctrl.add_argument("--id", dest="id", required=True)
+    axi_ctrl.set_defaults(axi_command="controls")
+
+    axi_chat = axi_sub.add_parser("chat", help="structured notes without long-poll")
+    axi_chat.add_argument("--state-dir", default=".observer")
+    axi_chat.add_argument("--id", dest="id", required=True)
+    axi_chat.add_argument("--since", default=None, help="only notes after this ts")
+    axi_chat.add_argument("--limit", type=int, default=50)
+    axi_chat.set_defaults(axi_command="chat")
 
     axi_doc = axi_sub.add_parser("doctor", help="TOON doctor for a project")
     axi_doc.add_argument("project", nargs="?", default=".")
@@ -1987,9 +2482,47 @@ Session rule:
     run.add_argument("--watch", choices=["stdout", "none"], default="stdout",
                      help="where dashboard chat events should be bridged")
     run.add_argument("--session", help="set RUNGUARD_SESSION; use 'auto' for a timestamped run lane")
+    run.add_argument(
+        "--no-lint",
+        action="store_true",
+        help="skip static lint gate (default: lint workflow.py before run)",
+    )
     run.add_argument("command", nargs=argparse.REMAINDER,
                      help="command to run; put -- before the command")
     run.set_defaults(func=cmd_run)
+
+    scaffold = sub.add_parser(
+        "scaffold",
+        help="emit a minimal workflow.py + EXPLAIN seed",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""examples:
+  observer-kit scaffold workflow --dest workflow.py --source sheet:leads --key id
+  observer-kit scaffold workflow --dest enrich.py --paid-provider --external-destination
+""",
+    )
+    scaffold.add_argument(
+        "kind",
+        nargs="?",
+        default="workflow",
+        choices=["workflow"],
+        help="what to scaffold (only workflow today)",
+    )
+    scaffold.add_argument("--dest", required=True, help="output path for workflow.py")
+    scaffold.add_argument("--source", default="source-id", help="source identity string")
+    scaffold.add_argument("--key", default="id", help="record key field name")
+    scaffold.add_argument("--name", default="workflow", help="start_observed_run name")
+    scaffold.add_argument(
+        "--paid-provider",
+        action="store_true",
+        help="comment in throttle() for shared provider pacing",
+    )
+    scaffold.add_argument(
+        "--external-destination",
+        action="store_true",
+        help="comment durable sink write before receipt",
+    )
+    scaffold.add_argument("--force", action="store_true", help="overwrite existing files")
+    scaffold.set_defaults(func=cmd_scaffold)
 
     test = sub.add_parser(
         "test",
@@ -2024,6 +2557,20 @@ correctly.
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if getattr(args, "version", False):
+        from observer_kit import version_info
+
+        info = version_info()
+        print(
+            f"observer-kit {info['version']} "
+            f"(sha={info['git_sha']} path={info['package_path']})"
+        )
+        return 0
+    # Note: subparser dest is "command", but `gate --command` and `run`'s
+    # remainder also use that name — rely on func, not dest, for dispatch.
+    if not getattr(args, "func", None):
+        parser.print_help()
+        return 2
     return args.func(args)
 
 

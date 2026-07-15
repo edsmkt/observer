@@ -9,8 +9,6 @@ Treat every job as a **harness**: the agent session is the brain; this skill
 supplies judgment; the CLI supplies plumbing; the script does the work; the
 watcher carries operator messages back into the session.
 
-Two leading guarantees shape every step:
-
 - **Liveness**: JSONL events and table rows advance while work happens so the
   dashboard stays current.
 - **Durability**: completed results reach a re-readable sink at a durable boundary
@@ -30,22 +28,27 @@ Read the Observer Kit README from the repository checkout
 for the product promise, skill/CLI split, operator journey, and dashboard expectations.
 
 Establish a verified CLI command prefix before project setup. Probe
-`observer-kit --help`, then `python3 -m observer_kit --help`. When both probes
-fail, install the CLI from the public repository into a writable Python
-environment using the README command, then repeat the probes. Package install
-is required for product runtime; the skill tree is playbook-only.
+`observer-kit --help`, then `python3 -m observer_kit --help`. Prefer
+`observer-kit axi help` / `python3 -m observer_kit axi help` and
+`observer-kit --version`. When both probes fail, install the CLI from the
+public repository into a writable Python environment using the README command,
+then repeat the probes. On `install_skew: true`, reinstall with the printed
+upgrade command. Package install is required for product runtime; the skill
+tree is playbook-only.
 
 Choose the active branch and load its reference:
 
-- **Write or adapt a production workflow**: read
+- **Operate** (run exists / check the run): axi home → run → attention / poll.
+- **Design** (write or adapt a production workflow): read
   [`references/pattern.md`](references/pattern.md) in full. It is the single
   source of truth for source identity, rows, durable boundaries, external
   writes, run lanes, controls, watchers, concurrency, and dashboard events.
-- **Respond to a running workflow**: read the run-lane, controls, watcher, and
-  recovery sections of `references/pattern.md`, then inspect the current JSONL,
-  durable destination, process state, and script.
 - **Change Observer Kit itself**: read `references/pattern.md` in full, inspect
   the affected runtime and matching tests, then run the full acceptance suite.
+
+Minimum harness: lock → schema_sample → dry-run limit → emit after persist →
+checkpoint → approval → full-run. Scaffold with
+`observer-kit scaffold workflow --dest workflow.py --source <id> --key id`.
 
 Read the target script/config when present; for new work, inspect the source and destination contracts first.
 
@@ -196,22 +199,26 @@ branch has direct evidence, and the user has reviewed the sample dashboard.
 
 ## 6. Run After Explicit Approval
 
-Ask for explicit confirmation after presenting the sample summary. Begin the
-full dataset through the intentional full-run flag after approval.
+Ask for explicit confirmation after presenting the sample summary. Full-run is
+machine-enforced: `start_observed_run(dry_run=False)` requires unacked
+`approve_full_run` (exit **4** / `approval_required` when missing). Dashboard
+Approve or `post_control` after the sample; success consumes approval.
+`observer-kit run` lint-gates by default (`--no-lint` for power users).
 
-Keep one dashboard server attached to the state directory. By default,
-`observer-kit run` creates or reuses one run-scoped watcher; different run IDs
-stay independent. Choose one all-run watcher for a single long-lived project session:
+Begin the full dataset through the intentional full-run flag after approval.
+
+Keep one dashboard on the state directory. `observer-kit run` creates or reuses
+one run-scoped watcher; use one all-run watcher for a long-lived session:
 
 ```bash
 observer-kit watch .observer --all --follow
 observer-kit run --state-dir .observer -- python3 workflow.py --full-run
 ```
 
-Orient with **`observer-kit axi`** (TOON status/runs/orphans). For chat, use the
-**poll** loop (`poll` → note → `reply` → `poll`). Watcher ownership refuses
-overlapping bridges. Prefer one dashboard; end with
-`observer-kit stop --sweep .observer`. Treat poll output as session transport.
+Orient with **`observer-kit axi`**. Chat: `poll` → note → `reply` → `poll`
+(re-run if harness ends; notes durable). Presence: listening / responding /
+idle. Watcher ownership refuses overlapping bridges. End with
+`observer-kit stop --sweep .observer`.
 
 **Complete when:** the full run has an explicit operator approval, live
 monitoring, a terminal ledger event, reconciled receipts, and a concise outcome
@@ -237,9 +244,6 @@ dashboard view.
 
 ## Reference Map
 
-- [`references/pattern.md`](references/pattern.md): production integration and
-  operation contract; read in full for workflow design and adaptation.
-- Package runtime: `observer_kit.runguard`, dashboard, watch, lint, **axi**.
-- `EXPLAIN.md`: project-specific intent for the operator.
-
-Run `observer-kit axi doctor .` after setup and `observer-kit test` after core changes.
+- [`references/pattern.md`](references/pattern.md): production contract; read in full for design.
+- Package runtime: `observer_kit.runguard`, dashboard, watch, lint, **axi**. `EXPLAIN.md`: operator intent.
+- Run `observer-kit axi doctor .` after setup and `observer-kit test` after core changes.

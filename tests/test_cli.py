@@ -29,6 +29,9 @@ if SOURCE_PACKAGE.is_file():
     CLI_ENV["PYTHONPATH"] = os.pathsep.join(
         [str(REPO_ROOT), str(IMPORT_SHIMS), CLI_ENV.get("PYTHONPATH", "")]
     )
+# CLI e2e focuses on plumbing; approval gate has dedicated tests.
+CLI_ENV["OBSERVER_ALLOW_UNAPPROVED_FULL_RUN"] = "1"
+CLI_ENV["OBSERVER_NO_LINT"] = "1"
 
 cli_probe = subprocess.run(
     [sys.executable, "-B", "-c", "import observer_kit"],

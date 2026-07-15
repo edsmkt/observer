@@ -376,9 +376,13 @@ observer-kit ps .observer                                 # list dashboards/watc
 observer-kit stop --orphans                               # dead-parent processes
 observer-kit stop --sweep .observer                       # end-of-session cleanup
 observer-kit validate-flow pipeline.flow.json             # Flow graph structure
+observer-kit --version                                    # package + git sha
+observer-kit axi help                                     # agent API catalog
 observer-kit axi --state-dir .observer                    # agent home (TOON)
 observer-kit axi runs --state-dir .observer
 observer-kit axi run --state-dir .observer --id runguard:lane
+observer-kit axi attention --state-dir .observer --id runguard:lane
+observer-kit axi sample-status --state-dir .observer --id runguard:lane
 observer-kit doctor [project]
 observer-kit test
 ```
@@ -398,14 +402,20 @@ not a replacement for the skill playbook or the human dashboard.
 | **Package API** | Workflow scripts | `start_observed_run`, intents, receipts |
 
 ```bash
+# Canonical agent probe (detect PATH vs package skew)
+observer-kit --version
+observer-kit axi help
+python3 -m observer_kit axi help
+
 # Home: state, live runs, orphan count, next steps (TOON)
 observer-kit axi --state-dir .observer
 
 observer-kit axi runs --state-dir .observer
 observer-kit axi run --state-dir .observer --id runguard:my-lane
+observer-kit axi attention --state-dir .observer --id runguard:my-lane
+observer-kit axi sample-status --state-dir .observer --id runguard:my-lane
 observer-kit axi doctor .
 observer-kit axi ps --state-dir .observer
-observer-kit axi help
 
 # Human visual review (separate process)
 observer-kit dashboard .observer
@@ -413,6 +423,11 @@ observer-kit dashboard .observer
 # Chat respond loop (still use poll for listening UI)
 observer-kit poll .observer --all
 ```
+
+Canonical install for agents: editable install in CI (`python3 -m pip install -e .`).
+`doctor` / `axi home` emit `install_skew: true` plus the upgrade command when
+PATH and package disagree. Full-run without approval exits **4**.
+`observer-kit run` lint-gates workflow scripts by default (`--no-lint` to skip).
 
 Tell agents in `AGENTS.md` / project instructions:
 

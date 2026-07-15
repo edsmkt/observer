@@ -15,6 +15,9 @@ _REPO = os.path.dirname(_TEST_DIR)
 RG_DIR = sys.argv[1] if len(sys.argv) > 1 else os.path.join(_TEST_DIR, 'import_shims')
 STATE = tempfile.mkdtemp(prefix='rg-data-')
 os.environ['RUNGUARD_STATE_DIR'] = STATE
+# Low-level harness tests exercise write/intent paths without the operator UI;
+# dedicated approval-gate coverage lives in test_approval.py and the approve-* cases below.
+os.environ['OBSERVER_ALLOW_UNAPPROVED_FULL_RUN'] = '1'
 sys.path.insert(0, _REPO)
 sys.path.insert(0, RG_DIR)
 import runguard  # noqa: E402
@@ -352,18 +355,33 @@ ok('dry-run write_receipt stays on the preview surface',
 run.success()
 
 # One full-run completion consumes pending operator approval.
-run = runguard.start_observed_run('approve-once', source='approve-once', dry_run=False)
-runguard.post_control(run.run_id, 'approve_full_run', note='go')
-# Stamp control in the past relative to a synthetic prior full-run finish by
-# completing this full run (consumes approval), then ensure a later run does not
-# still see it.
-ok('full-run sees pending approval before completion',
-   any(c.get('kind') == 'approve_full_run' for c in run.check_controls()))
-run.success()
-run = runguard.start_observed_run('approve-once', source='approve-once', dry_run=False)
-ok('completed full-run consumes approval for later attempts',
-   run.check_controls() == [])
-run.success()
+# Temporarily re-enable the gate so we prove machine refusal + consumption.
+_prev_allow = os.environ.pop('OBSERVER_ALLOW_UNAPPROVED_FULL_RUN', None)
+try:
+    rid = runguard.predicted_run_id('approve-once', source='approve-once')
+    refused = False
+    try:
+        runguard.start_observed_run('approve-once', source='approve-once', dry_run=False)
+    except runguard.ApprovalRequired as exc:
+        refused = exc.run_id == rid or 'approval_required' in str(exc)
+    ok('full-run without approval raises ApprovalRequired', refused)
+
+    runguard.post_control(rid, 'approve_full_run', note='go')
+    run = runguard.start_observed_run('approve-once', source='approve-once', dry_run=False)
+    ok('full-run proceeds when approve_full_run is pending',
+       any(c.get('kind') == 'approve_full_run' for c in run.check_controls()))
+    run.success()
+    refused_again = False
+    try:
+        runguard.start_observed_run('approve-once', source='approve-once', dry_run=False)
+    except runguard.ApprovalRequired:
+        refused_again = True
+    ok('completed full-run consumes approval for later attempts', refused_again)
+finally:
+    if _prev_allow is not None:
+        os.environ['OBSERVER_ALLOW_UNAPPROVED_FULL_RUN'] = _prev_allow
+    else:
+        os.environ['OBSERVER_ALLOW_UNAPPROVED_FULL_RUN'] = '1'
 
 # Reserved counter names must not break terminal lifecycle fields.
 run = runguard.start_observed_run('counter-reserve', source='counter-src', dry_run=True)

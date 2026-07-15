@@ -19,8 +19,16 @@ source of truth for product runtime. The CLI makes that behavior repeatable.
 | --- | --- | --- | --- |
 | Global skills | `npx skills add edsmkt/observer-kit -g` | You want Observer available to agents in every local project. | Installs the Observer Kit and Observer Flow playbooks. The agent still probes for the CLI before setup. |
 | Project skills | `npx skills add edsmkt/observer-kit` | You want Observer available only in the current project. | Same playbooks, scoped to the project. Useful for teams that vendor skills with a repo. |
-| CLI from GitHub | `python3 -m pip install git+https://github.com/edsmkt/observer-kit.git` | You want the normal `observer-kit` command without cloning this repo. | Provides package imports (`observer_kit.runguard`) and `observer-kit init`, `dashboard`, `run`, `watch`, `reply`, `lint`, `doctor`, and `test`. Wheels ship runtime under the `observer_kit` package. |
-| Editable checkout | `python3 -m pip install -e .` | You are developing Observer itself or testing local changes. | Provides the same CLI and package from this checkout. `python3 -m observer_kit --help` should also work. |
+| CLI from GitHub | `python3 -m pip install git+https://github.com/edsmkt/observer-kit.git` | You want the normal `observer-kit` command without cloning this repo. | Provides package imports (`observer_kit.runguard`) and the full CLI surface including `axi`, `poll`, `lint`, `ps`, `stop`, `scaffold`, `gate`, `validate-flow`. Wheels ship runtime under the `observer_kit` package. |
+| Editable checkout | `python3 -m pip install -e .` | You are developing Observer itself or testing local changes. **Preferred in CI.** | Provides the same CLI and package from this checkout. Canonical probe: `observer-kit axi help` then `python3 -m observer_kit axi help`. `observer-kit --version` prints package version + git sha. |
+
+### PATH skew
+
+If `observer-kit` on PATH is an older install while `python3 -m observer_kit`
+loads a newer package, agents will conclude commands like `axi` / `poll` do not
+exist. `observer-kit doctor` and `observer-kit axi home` emit
+`install_skew: true` plus the exact upgrade command. Always document only
+commands that exist on the published entry point of the same version.
 | Deprecated `--vendor` init | `observer-kit init . --vendor` | Temporary bridge for workflows that still expect local `runguard.py`. | Copies package modules into the project; doctor warns. Prefer package import. Skill trees never ship product `.py`. |
 
 ## Compatibility Contract
