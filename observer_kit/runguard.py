@@ -546,20 +546,6 @@ def input_snapshot(source: object, records: object | None = None,
     return result
 
 
-def replay_fixture(path: str) -> list:
-    """Load a JSON array, one JSON object, or JSONL fixture for a dry simulation."""
-    with open(path, encoding='utf-8') as fh:
-        raw = fh.read()
-    try:
-        value = json.loads(raw)
-    except json.JSONDecodeError:
-        value = []
-        for line in raw.splitlines():
-            if line.strip():
-                value.append(json.loads(line))
-    return value if isinstance(value, list) else [value]
-
-
 def _control_path(run_id: object | None = None) -> str:
     """Write path for control requests (per-lane when ``run_id`` is a lane)."""
     return _side_channel_path('controls.jsonl', run_id)
@@ -1407,18 +1393,6 @@ class ObservedRun:
         self._event('dead_letter', status='failed', **payload)
         self._event('record', table='dead_letters', key=key, status='failed', **payload)
 
-    def lineage(self, record_key: object, **fields) -> None:
-        """Attach provenance (source URL/provider/reasoning/version) to one output row."""
-        self._event('lineage', record_key=str(record_key), **fields)
-
-    def simulate(self, fixture: str) -> list:
-        """Load deterministic fixture data and record that this attempt is simulated."""
-        records = replay_fixture(fixture)
-        snapshot = input_snapshot(fixture, records=records)
-        self._event('simulation', fixture=os.path.realpath(fixture), input_snapshot=snapshot,
-                    records=len(records))
-        return records
-
     def gate(self, name: str, observed: int | float, minimum: int | float | None = None,
              maximum: int | float | None = None, action: str = 'pause', **fields) -> bool:
         """Record a batch quality gate; a failed default gate pauses before more writes."""
@@ -1821,23 +1795,3 @@ def post_chat(run_id: str, anchor: str, text: str, author: str = 'agent',
         f.write(json.dumps(rec, ensure_ascii=False, default=str) + '\n')
 
 
-def wait_for_feedback(run_id: str, timeout: float = 600, poll: float = 2.0,
-                      since_ts: str | None = None) -> list:
-    """Block until the operator leaves at least one new note for this run in the
-    dashboard, or until timeout. Returns the new user messages (empty on timeout).
-
-    This is the AXI-style review gate: run a SMALL SAMPLE, call this so the operator
-    can inspect the sample in the dashboard and leave notes on cells/columns, then
-    adapt and run the full list. ``since_ts`` defaults to the instant before the
-    wait begins; notes must carry a strictly later timestamp (nanosecond stamps)
-    so a same-second reply is not dropped.
-    """
-    if since_ts is None:
-        since_ts = _timestamp()
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        msgs = read_chat(run_id, after_ts=since_ts, author='user')
-        if msgs:
-            return msgs
-        time.sleep(poll)
-    return []

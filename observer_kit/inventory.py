@@ -172,6 +172,3 @@ def _active_watchers(state_dir: Path) -> list[dict]:
             watchers.append(meta)
     return sorted(watchers, key=lambda item: str(item.get("started", "")))
 
-# Back-compat aliases used by older call sites
-_dashboard_records = dashboard_records
-_watcher_records = watcher_records

@@ -421,12 +421,22 @@ fixture = os.path.join(STATE, 'simulation.jsonl')
 with open(fixture, 'w', encoding='utf-8') as fh:
     fh.write('{"id":"a"}\n{"id":"b"}\n')
 run = runguard.start_observed_run('simulation-demo', dry_run=True)
-simulated = run.simulate(fixture)
+simulated = []
+with open(fixture, encoding='utf-8') as fh:
+    for line in fh:
+        if line.strip():
+            simulated.append(json.loads(line))
+snapshot = runguard.input_snapshot(fixture, records=simulated)
+runguard.ledger(
+    run.scope, 'simulation',
+    fixture=os.path.realpath(fixture),
+    input_snapshot=snapshot,
+    records=len(simulated),
+)
 run.success()
 ok('simulation fixture is replayable and ledgered',
    [row['id'] for row in simulated] == ['a', 'b'] and
    any(e.get('event') == 'simulation' and e.get('records') == 2 for e in events(run)))
-
 # A bounded real response can establish the observed schema and remain inspectable.
 run = runguard.start_observed_run('schema-sample-demo', source='api:companies', dry_run=True,
                                   summary_metrics=['sampled'])

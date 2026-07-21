@@ -25,29 +25,14 @@ from observer_kit.inventory import (
     _load_dashboard_meta,
     _read_json_file,
     _terminate_pid,
-    dashboard_records as _dashboard_records,
-    watcher_records as _watcher_records,
+    dashboard_records,
+    watcher_records,
 )
 
 
 # Package root (observer_kit/) and optional source checkout root (repo/).
 PACKAGE_ROOT = Path(__file__).resolve().parent
 ROOT = PACKAGE_ROOT.parent if (PACKAGE_ROOT.parent / "pyproject.toml").is_file() else PACKAGE_ROOT
-
-
-def _skill_dir() -> Path:
-    """Agent skill playbook directory (markdown/templates only — not product runtime)."""
-    env_dir = os.environ.get("OBSERVER_KIT_SKILL_DIR")
-    if env_dir:
-        return Path(env_dir).expanduser().resolve()
-    candidates = []
-    if (ROOT / "pyproject.toml").is_file():
-        candidates.append(ROOT / ".claude" / "skills" / "observer-kit")
-    candidates.append(PACKAGE_ROOT / "_skills" / "observer-kit")
-    return next((p for p in candidates if p.exists()), candidates[0] if candidates else PACKAGE_ROOT)
-
-
-SKILL_DIR = _skill_dir()
 
 
 def package_file(name: str) -> Path:
@@ -61,19 +46,6 @@ def package_file(name: str) -> Path:
     return path
 
 
-def skill_file(name: str) -> Path:
-    """Resolve an agent skill playbook/template file (not product runtime)."""
-    path = SKILL_DIR / name
-    if path.exists():
-        return path
-    # Templates also ship in the package for init without a skill tree.
-    pkg = PACKAGE_ROOT / name
-    if pkg.exists():
-        return pkg
-    raise SystemExit(
-        f"Observer Kit skill/template file not found: {name}\n"
-        f"Looked under {SKILL_DIR} and {PACKAGE_ROOT}."
-    )
 
 
 def copy_file(src: Path, dst: Path, force: bool) -> str:
@@ -470,19 +442,6 @@ def cmd_reply(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_agent_status(args: argparse.Namespace) -> int:
-    state_dir = Path(args.state_dir).expanduser().resolve()
-    state_dir.mkdir(parents=True, exist_ok=True)
-    if args.listening:
-        status = "listening"
-    elif args.responding:
-        status = "responding"
-    else:
-        status = "idle"
-    pid = os.getpid() if status == "listening" else None
-    _append_agent_status(state_dir, args.run, status, pid=pid)
-    print(f"agent status {status} for {args.run}")
-    return 0
 
 
 def cmd_poll(args: argparse.Namespace) -> int:
@@ -917,11 +876,11 @@ def cmd_ps(args: argparse.Namespace) -> int:
     """List Observer dashboards and watchers (and flag orphans)."""
     unique_dirs = _resolve_state_dirs(args)
     scan = not bool(getattr(args, "no_scan", False))
-    dashboards = _dashboard_records(unique_dirs or None, scan_ports=scan)
+    dashboards = dashboard_records(unique_dirs or None, scan_ports=scan)
 
     watchers: list[dict] = []
     for path in unique_dirs:
-        watchers.extend(_watcher_records(path))
+        watchers.extend(watcher_records(path))
 
     if not dashboards and not watchers:
         print("no observer dashboards or watchers found")
@@ -1020,7 +979,7 @@ def cmd_stop(args: argparse.Namespace) -> int:
     dry_run = bool(getattr(args, "dry_run", False))
 
     # Discover dashboards via port scan always; filter by state dir when given.
-    dashboards = _dashboard_records(unique_dirs or None, scan_ports=True)
+    dashboards = dashboard_records(unique_dirs or None, scan_ports=True)
     if unique_dirs:
         want = {str(p) for p in unique_dirs}
         dashboards = [
@@ -1032,7 +991,7 @@ def cmd_stop(args: argparse.Namespace) -> int:
 
     watchers: list[dict] = []
     for path in unique_dirs:
-        watchers.extend(_watcher_records(path))
+        watchers.extend(watcher_records(path))
 
     targets: list[tuple[str, dict]] = []
     for rec in dashboards:
@@ -1497,23 +1456,6 @@ def build_parser() -> argparse.ArgumentParser:
     reply.add_argument("--resolved", action="store_true", help="mark the note resolved")
     reply.add_argument("--text", required=True, help="reply text")
     reply.set_defaults(func=cmd_reply)
-
-    agent_status = sub.add_parser(
-        "agent-status",
-        help="mark agent presence: listening, responding, or idle",
-        epilog="""example: observer-kit agent-status .observer --run runguard:my-run --listening""",
-    )
-    agent_status.add_argument("state_dir", nargs="?", default=".observer",
-                              help="ledger/state directory")
-    agent_status.add_argument("--run", required=True, help="run id shown in the dashboard")
-    mode = agent_status.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--listening", action="store_true",
-                      help="show that a poll is waiting for operator notes")
-    mode.add_argument("--responding", action="store_true",
-                      help="show the agent-responding spinner")
-    mode.add_argument("--idle", action="store_true",
-                      help="clear listening/responding presence")
-    agent_status.set_defaults(func=cmd_agent_status)
 
     poll = sub.add_parser(
         "poll",
