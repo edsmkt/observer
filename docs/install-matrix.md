@@ -29,8 +29,6 @@ loads a newer package, agents will conclude commands like `axi` / `poll` do not
 exist. `observer-kit doctor` and `observer-kit axi home` emit
 `install_skew: true` plus the exact upgrade command. Always document only
 commands that exist on the published entry point of the same version.
-| Deprecated `--vendor` init | `observer-kit init . --vendor` | Temporary bridge for workflows that still expect local `runguard.py`. | Copies package modules into the project; doctor warns. Prefer package import. Skill trees never ship product `.py`. |
-
 ## Compatibility Contract
 
 All install paths should agree on these observable behaviors:

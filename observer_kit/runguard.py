@@ -71,6 +71,8 @@ import sys
 import time
 import weakref
 
+from observer_kit._util import lane_from_run_id as _lane_from_run_id, timestamp as _timestamp
+
 _STATE_DIR = os.environ.get('RUNGUARD_STATE_DIR') or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '.observer')
 
@@ -169,18 +171,6 @@ def _install_signal_handlers() -> None:
     _signal_handlers_installed = True
 
 
-def _timestamp() -> str:
-    """UTC RFC 3339 timestamp with nanoseconds for stable ordering.
-
-    Second-only stamps made same-second chat and ledger events reorder or drop
-    under ``after_ts`` filters (for example ``wait_for_feedback``).
-    """
-    ns = time.time_ns()
-    secs, nsec = divmod(ns, 1_000_000_000)
-    base = time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(secs))
-    return f'{base}.{nsec:09d}Z'
-
-
 def _ts_order_key(ts: object) -> str:
     """Normalize RFC3339 stamps so second-only and nanosecond forms compare safely.
 
@@ -257,22 +247,6 @@ def _run_id_for_ledger_path(path: str) -> str:
     if base.endswith('.jsonl'):
         return f'runguard:{base[:-6]}'
     return f'runguard:{base}'
-
-
-def _lane_from_run_id(run_id: object) -> str:
-    """Extract the lane folder name from ``runguard:<lane>`` (optional ``.jsonl``)."""
-    raw = str(run_id or '').strip()
-    if not raw or raw == 'all':
-        return ''
-    _kind, sep, name = raw.partition(':')
-    if sep:
-        raw = name
-    raw = os.path.basename(raw)
-    if raw.endswith('.jsonl'):
-        raw = raw[:-6]
-    if not raw or raw in {'.', '..'}:
-        return ''
-    return raw
 
 
 def _ensure_lane_explain(slug: str) -> None:

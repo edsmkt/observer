@@ -88,11 +88,14 @@ def _path_binary_probe() -> dict | None:
     binary = shutil.which("observer-kit")
     if not binary:
         return None
-    binary_path = str(Path(binary).resolve())
-    result: dict = {"binary": binary_path, "version": None, "package_path": None,
-                    "has_axi": None, "error": None}
+    result: dict = {
+        "binary": str(Path(binary).resolve()),
+        "version": None,
+        "package_path": None,
+        "has_axi": None,
+        "error": None,
+    }
     try:
-        # Prefer --version (new surface). Fall back to --help for old binaries.
         proc = subprocess.run(
             [binary, "--version"],
             capture_output=True,
@@ -102,11 +105,10 @@ def _path_binary_probe() -> dict | None:
         )
         out = (proc.stdout or "") + (proc.stderr or "")
         if proc.returncode == 0 and "observer-kit" in out.lower():
-            parsed = _parse_version_line(out)
-            result.update(parsed)
-            result["has_axi"] = True  # --version exists ⇒ modern enough
+            result.update(_parse_version_line(out))
+            result["has_axi"] = True
             return result
-        # Old binary: --version may be usage error. Probe help for axi.
+        # Older binary: --version may fail; probe help for axi.
         help_proc = subprocess.run(
             [binary, "--help"],
             capture_output=True,
@@ -116,31 +118,6 @@ def _path_binary_probe() -> dict | None:
         )
         help_out = (help_proc.stdout or "") + (help_proc.stderr or "")
         result["has_axi"] = bool(re.search(r"\baxi\b", help_out))
-        # Try to discover which package the binary's interpreter loads.
-        try:
-            with open(binary, encoding="utf-8", errors="replace") as fh:
-                first = fh.readline().strip()
-            if first.startswith("#!"):
-                py = first[2:].strip().split()[0]
-                probe = subprocess.run(
-                    [py, "-c",
-                     "import observer_kit; import pathlib; "
-                     "print(getattr(observer_kit,'__version__','?')); "
-                     "print(pathlib.Path(observer_kit.__file__).resolve().parent)"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                    env={k: v for k, v in os.environ.items() if k != "PYTHONPATH"},
-                    cwd="/",
-                )
-                if probe.returncode == 0:
-                    lines = [ln.strip() for ln in probe.stdout.splitlines() if ln.strip()]
-                    if lines:
-                        result["version"] = lines[0]
-                    if len(lines) > 1:
-                        result["package_path"] = lines[1]
-        except OSError:
-            pass
         return result
     except (OSError, subprocess.SubprocessError) as exc:
         result["error"] = str(exc)
@@ -155,10 +132,7 @@ def detect_install_skew() -> dict:
     """
     local = version_info()
     path_info = _path_binary_probe()
-    skew = False
-    reasons: list[str] = []
     if path_info is None:
-        # No PATH binary — module-only install is fine; note it.
         return {
             "install_skew": False,
             "path_binary": "none",
@@ -168,6 +142,8 @@ def detect_install_skew() -> dict:
             "upgrade": upgrade_command(),
             "reason": "no observer-kit on PATH; use python3 -m observer_kit",
         }
+    skew = False
+    reasons: list[str] = []
     path_ver = path_info.get("version")
     path_pkg = path_info.get("package_path")
     local_pkg = local["package_path"]

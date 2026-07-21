@@ -13,6 +13,22 @@ from urllib.error import URLError
 from urllib.request import urlopen
 from pathlib import Path
 
+from observer_kit._util import (
+    lane_from_run_id as _lane_from_run_id,
+    pid_alive as _pid_alive,
+    timestamp as _timestamp,
+)
+from observer_kit.inventory import (
+    DASHBOARD_META_NAME,
+    _active_watchers,
+    _dashboard_meta_path,
+    _load_dashboard_meta,
+    _read_json_file,
+    _terminate_pid,
+    dashboard_records as _dashboard_records,
+    watcher_records as _watcher_records,
+)
+
 
 # Package root (observer_kit/) and optional source checkout root (repo/).
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -27,21 +43,11 @@ def _skill_dir() -> Path:
     candidates = []
     if (ROOT / "pyproject.toml").is_file():
         candidates.append(ROOT / ".claude" / "skills" / "observer-kit")
-        # Legacy layout kept as a fallback for older checkouts.
-        candidates.append(ROOT / "skills" / "observer-kit")
     candidates.append(PACKAGE_ROOT / "_skills" / "observer-kit")
     return next((p for p in candidates if p.exists()), candidates[0] if candidates else PACKAGE_ROOT)
 
 
 SKILL_DIR = _skill_dir()
-
-
-def _timestamp() -> str:
-    """UTC RFC 3339 with nanoseconds — matches runguard ordering/chat watermarks."""
-    ns = time.time_ns()
-    secs, nsec = divmod(ns, 1_000_000_000)
-    base = time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(secs))
-    return f'{base}.{nsec:09d}Z'
 
 
 def package_file(name: str) -> Path:
@@ -88,19 +94,6 @@ def cmd_init(args: argparse.Namespace) -> int:
     project = Path(args.project).expanduser().resolve()
     project.mkdir(parents=True, exist_ok=True)
     messages: list[str] = []
-    # Optional legacy vendoring (deprecated): only with --vendor.
-    if getattr(args, "vendor", False):
-        messages.append(
-            copy_file(package_file("runguard.py"), project / "runguard.py", args.force)
-        )
-        if args.watch:
-            messages.append(
-                copy_file(package_file("watch_chat.py"), project / "watch_chat.py", args.force)
-            )
-        messages.append(
-            "note: --vendor copies are deprecated; prefer "
-            "`from observer_kit.runguard import start_observed_run`"
-        )
     state_dir = (project / args.state_dir).resolve()
     state_dir.mkdir(parents=True, exist_ok=True)
     runs_dir = state_dir / "runs"
@@ -151,13 +144,10 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
 
 
 def cmd_test(args: argparse.Namespace) -> int:
-    """Run the package-oriented acceptance suite."""
+    """Run the package-oriented acceptance suite (script-style tests)."""
     tests_dir = ROOT / "tests"
     if not tests_dir.is_dir():
-        # Installed wheel may not ship tests; fall back to source checkout only.
         raise SystemExit(f"tests directory not found: {tests_dir}")
-    package_dir = str(PACKAGE_ROOT)
-    # runguard subprocess tests use `import runguard` via import_shims.
     shim_dir = str(tests_dir / "import_shims")
     skill_dir = str(ROOT / ".claude" / "skills" / "observer-kit")
     flow_skill_dir = ROOT / ".claude" / "skills" / "observer-flow"
@@ -228,20 +218,6 @@ def cmd_gate(args: argparse.Namespace) -> int:
     return int(gate_main(argv))
 
 
-def _lane_from_run_id(run_id: object) -> str:
-    raw = str(run_id or "").strip()
-    if not raw or raw == "all":
-        return ""
-    if ":" in raw:
-        raw = raw.split(":", 1)[1]
-    raw = Path(raw).name
-    if raw.endswith(".jsonl"):
-        raw = raw[:-6]
-    if not raw or raw in {".", ".."}:
-        return ""
-    return raw
-
-
 def _chat_path(state_dir: Path, run_id: object | None = None) -> Path:
     """Per-lane chat file under runs/<lane>/; root for project-wide ``all``."""
     lane = _lane_from_run_id(run_id)
@@ -250,24 +226,37 @@ def _chat_path(state_dir: Path, run_id: object | None = None) -> Path:
     return state_dir / "chat.jsonl"
 
 
-def _pid_alive(pid: object) -> bool:
-    try:
-        os.kill(int(pid), 0)
-        return True
-    except (OSError, TypeError, ValueError):
-        return False
 
-
-def _active_watchers(state_dir: Path) -> list[dict]:
-    watchers = []
-    for path in state_dir.glob(".observer-watcher-*.lock"):
-        try:
-            meta = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError):
-            continue
-        if meta.get("active") and _pid_alive(meta.get("pid")):
-            watchers.append(meta)
-    return sorted(watchers, key=lambda item: str(item.get("started", "")))
+def _write_chat_message(
+    state_dir: Path,
+    run_id: object,
+    text: str,
+    *,
+    anchor: str = "run",
+    author: str = "agent",
+    resolved: bool = False,
+    fsync: bool = False,
+) -> Path:
+    """Append one chat JSONL record; return its path."""
+    rec = {
+        "ts": _timestamp(),
+        "run": run_id,
+        "anchor": anchor,
+        "author": author,
+        "text": text,
+        "resolved": bool(resolved),
+    }
+    path = _chat_path(state_dir, run_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+        if fsync:
+            fh.flush()
+            try:
+                os.fsync(fh.fileno())
+            except OSError:
+                pass
+    return path
 
 
 def _covering_watcher(state_dir: Path, run_id: str) -> dict | None:
@@ -470,18 +459,9 @@ def cmd_reply(args: argparse.Namespace) -> int:
     text = args.text.strip()
     if not text:
         raise SystemExit("reply text is required")
-    rec = {
-        "ts": _timestamp(),
-        "run": args.run,
-        "anchor": args.anchor,
-        "author": "agent",
-        "text": text,
-        "resolved": bool(args.resolved),
-    }
-    path = _chat_path(state_dir, args.run)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+    _write_chat_message(
+        state_dir, args.run, text, anchor=args.anchor, resolved=bool(args.resolved),
+    )
     try:
         _append_agent_status(state_dir, args.run, "idle")
     except OSError:
@@ -528,23 +508,10 @@ def cmd_poll(args: argparse.Namespace) -> int:
         text = args.reply.strip()
         if not text:
             raise SystemExit("--reply text must be non-empty")
-        rec = {
-            "ts": _timestamp(),
-            "run": run_id,
-            "anchor": args.anchor,
-            "author": "agent",
-            "text": text,
-            "resolved": bool(args.resolved),
-        }
-        path = _chat_path(state_dir, run_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
-            fh.flush()
-            try:
-                os.fsync(fh.fileno())
-            except OSError:
-                pass
+        _write_chat_message(
+            state_dir, run_id, text, anchor=args.anchor,
+            resolved=bool(args.resolved), fsync=True,
+        )
         print(f"replied to {run_id} {args.anchor}", flush=True)
 
     # Presence: listening while we wait. Clean up to idle on every exit path
@@ -564,10 +531,9 @@ def cmd_poll(args: argparse.Namespace) -> int:
         except OSError:
             pass
 
-    if all_runs:
-        _append_agent_status(state_dir, "all", "listening", pid=os.getpid())
-    else:
-        _append_agent_status(state_dir, run_id, "listening", pid=os.getpid())
+    _append_agent_status(
+        state_dir, "all" if all_runs else run_id, "listening", pid=os.getpid(),
+    )
 
     seen = set()
     if not args.include_existing:
@@ -631,14 +597,10 @@ def cmd_poll(args: argparse.Namespace) -> int:
                 )
                 if args.follow:
                     delivered = False  # keep listening after a batch
-                    if all_runs:
-                        _append_agent_status(
-                            state_dir, "all", "listening", pid=os.getpid(),
-                        )
-                    elif run_id:
-                        _append_agent_status(
-                            state_dir, run_id, "listening", pid=os.getpid(),
-                        )
+                    _append_agent_status(
+                        state_dir, "all" if all_runs else run_id,
+                        "listening", pid=os.getpid(),
+                    )
                     continue
                 return 0
             if deadline is not None and time.time() >= deadline:
@@ -951,165 +913,6 @@ def cmd_run(args: argparse.Namespace) -> int:
     return rc
 
 
-DASHBOARD_META_NAME = ".observer-dashboard.json"
-# Ports scanned by ``ps`` / ``stop`` when discovering live dashboards without a meta file.
-_DASHBOARD_PORT_SCAN = range(8484, 8521)
-
-
-def _read_json_file(path: Path) -> dict:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return {}
-
-
-def _dashboard_meta_path(state_dir: Path) -> Path:
-    return state_dir.expanduser().resolve() / DASHBOARD_META_NAME
-
-
-def _load_dashboard_meta(state_dir: Path) -> dict | None:
-    path = _dashboard_meta_path(state_dir)
-    if not path.is_file():
-        return None
-    meta = _read_json_file(path)
-    return meta or None
-
-
-def _probe_dashboard_port(port: int) -> dict | None:
-    """Return live dashboard info from /api/meta when something answers on port."""
-    try:
-        with urlopen(f"http://127.0.0.1:{port}/api/meta", timeout=0.25) as response:
-            if response.status != 200:
-                return None
-            payload = json.loads(response.read().decode("utf-8") or "{}")
-    except (OSError, URLError, json.JSONDecodeError, UnicodeDecodeError, ValueError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    raw = payload.get("state_dir") or payload.get("runguard") or ""
-    if not raw:
-        return None
-    try:
-        state = str(Path(raw).expanduser().resolve())
-    except OSError:
-        state = str(raw)
-    pid = payload.get("pid")
-    parent = payload.get("parent_pid")
-    return {
-        "kind": "dashboard",
-        "source": "live",
-        "port": int(payload.get("port") or port),
-        "pid": pid,
-        "parent_pid": parent,
-        "state_dir": state,
-        "idle_timeout": payload.get("idle_timeout"),
-        "active": True,
-        "orphan": bool(parent) and not _pid_alive(parent),
-        "pid_alive": _pid_alive(pid) if pid is not None else True,
-    }
-
-
-def _dashboard_records(state_dirs: list[Path] | None, *, scan_ports: bool) -> list[dict]:
-    """Inventory dashboards from meta files and/or live port probes."""
-    found: dict[tuple, dict] = {}
-
-    def _key(rec: dict) -> tuple:
-        return (rec.get("port"), rec.get("state_dir"), rec.get("pid"))
-
-    def _add(rec: dict) -> None:
-        if not rec:
-            return
-        found[_key(rec)] = rec
-
-    for state in state_dirs or []:
-        meta = _load_dashboard_meta(state)
-        if not meta:
-            continue
-        pid = meta.get("pid")
-        parent = meta.get("parent_pid")
-        alive = _pid_alive(pid) if pid is not None else False
-        port = meta.get("port")
-        live = _probe_dashboard_port(int(port)) if port is not None and alive else None
-        rec = {
-            "kind": "dashboard",
-            "source": "meta",
-            "port": port,
-            "pid": pid,
-            "parent_pid": parent,
-            "state_dir": str(state.expanduser().resolve()),
-            "idle_timeout": meta.get("idle_timeout"),
-            "started": meta.get("started"),
-            "active": bool(meta.get("active", True)) and alive,
-            "pid_alive": alive,
-            "orphan": bool(parent) and not _pid_alive(parent) and alive,
-        }
-        if live:
-            rec["source"] = "meta+live"
-            rec["orphan"] = live.get("orphan", rec["orphan"])
-            rec["pid"] = live.get("pid") or rec["pid"]
-        _add(rec)
-
-    if scan_ports:
-        for port in _DASHBOARD_PORT_SCAN:
-            live = _probe_dashboard_port(port)
-            if live:
-                _add(live)
-
-    return sorted(
-        found.values(),
-        key=lambda r: (int(r.get("port") or 0), str(r.get("state_dir") or "")),
-    )
-
-
-def _watcher_records(state_dir: Path) -> list[dict]:
-    out = []
-    for watcher in _active_watchers(state_dir):
-        parent = watcher.get("parent_pid")
-        pid = watcher.get("pid")
-        dead_parent = (
-            parent is not None and not _pid_alive(parent) and _pid_alive(pid)
-        )
-        out.append({
-            "kind": "watcher",
-            "pid": pid,
-            "parent_pid": parent,
-            "mode": watcher.get("mode"),
-            "run": watcher.get("run"),
-            "key": watcher.get("key"),
-            "started": watcher.get("started"),
-            "state_dir": str(state_dir.expanduser().resolve()),
-            "pid_alive": _pid_alive(pid),
-            # Orphan = still running after the owning parent died.
-            "orphan": dead_parent,
-            "independent": parent is None,
-        })
-    return out
-
-
-def _terminate_pid(pid: object, *, wait: float = 2.0) -> str:
-    """SIGTERM then SIGKILL a process. Returns action label."""
-    try:
-        pid_i = int(pid)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return "skip"
-    if pid_i <= 0 or not _pid_alive(pid_i):
-        return "dead"
-    try:
-        os.kill(pid_i, 15)  # SIGTERM
-    except OSError:
-        return "error"
-    deadline = time.time() + wait
-    while time.time() < deadline:
-        if not _pid_alive(pid_i):
-            return "terminated"
-        time.sleep(0.05)
-    try:
-        os.kill(pid_i, 9)  # SIGKILL
-    except OSError:
-        return "error"
-    return "killed"
-
-
 def cmd_ps(args: argparse.Namespace) -> int:
     """List Observer dashboards and watchers (and flag orphans)."""
     unique_dirs = _resolve_state_dirs(args)
@@ -1126,37 +929,37 @@ def cmd_ps(args: argparse.Namespace) -> int:
             print("tip: pass a state dir to list watchers, e.g. observer-kit ps .observer")
         return 0
 
-    if dashboards:
-        print("dashboards:")
-        for rec in dashboards:
-            flags = []
-            if rec.get("orphan"):
-                flags.append("ORPHAN")
+    def _flags(rec, *, watcher=False):
+        flags = []
+        if rec.get("orphan"):
+            flags.append("ORPHAN")
+        if watcher:
+            if rec.get("independent"):
+                flags.append("independent")
+        else:
             if rec.get("parent_pid") is None and rec.get("pid_alive"):
                 flags.append("independent")
             if not rec.get("pid_alive", True):
                 flags.append("dead")
             if not rec.get("active", True):
                 flags.append("inactive")
-            flag_s = f" [{' '.join(flags)}]" if flags else ""
+        return f" [{' '.join(flags)}]" if flags else ""
+
+    if dashboards:
+        print("dashboards:")
+        for rec in dashboards:
             print(
                 f"  port={rec.get('port')} pid={rec.get('pid')} "
                 f"parent={rec.get('parent_pid') or 'independent'} "
-                f"state={rec.get('state_dir')}{flag_s}"
+                f"state={rec.get('state_dir')}{_flags(rec)}"
             )
     if watchers:
         print("watchers:")
         for rec in watchers:
-            flags = []
-            if rec.get("orphan"):
-                flags.append("ORPHAN")
-            if rec.get("independent"):
-                flags.append("independent")
-            flag_s = f" [{' '.join(flags)}]" if flags else ""
             target = "all runs" if rec.get("mode") == "all" else rec.get("run")
             print(
                 f"  pid={rec.get('pid')} parent={rec.get('parent_pid') or 'independent'} "
-                f"target={target} state={rec.get('state_dir')}{flag_s}"
+                f"target={target} state={rec.get('state_dir')}{_flags(rec, watcher=True)}"
             )
     orphans = sum(1 for r in dashboards + watchers if r.get("orphan"))
     if orphans:
@@ -1302,29 +1105,14 @@ def cmd_stop(args: argparse.Namespace) -> int:
 
 def cmd_doctor(args: argparse.Namespace) -> int:
     from observer_kit import detect_install_skew, version_info
+    from observer_kit.axi import substrate_checks
 
     project = Path(args.project).expanduser().resolve()
-    checks = []
-    checks.append(("project exists", project.exists()))
-    checks.append(("package runguard available", package_file("runguard.py").exists()))
-    checks.append(("package dashboard available", package_file("run_dashboard.py").exists()))
-    checks.append(("package dashboard asset available", package_file("assets/dashboard.js").exists()))
-    checks.append(("package watcher available", package_file("watch_chat.py").exists()))
-    checks.append(("state dir exists", (project / args.state_dir).exists()))
-    checks.append(
-        ("state dir ignores local ledger data",
-         (project / args.state_dir / ".gitignore").exists())
-    )
-    checks.append(
-        ("operator explainer exists",
-         (project / args.state_dir / "EXPLAIN.md").exists())
-    )
-    checks.append(("runs/ home exists", (project / args.state_dir / "runs").is_dir()))
-
+    checks = substrate_checks(project, args.state_dir)
     ok = True
-    for label, passed in checks:
-        ok = ok and passed
-        print(f"{'OK ' if passed else 'ERR'} {label}")
+    for item in checks:
+        ok = ok and item["ok"]
+        print(f"{'OK ' if item['ok'] else 'ERR'} {item['label']}")
 
     ver = version_info()
     print(f"OK  package version {ver['version']} sha={ver['git_sha']}")
@@ -1339,27 +1127,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(f"    upgrade:     {skew.get('upgrade')}")
         print("    canonical probe: observer-kit axi help")
         print("                     python3 -m observer_kit axi help")
-        # Flag skew for agents without failing substrate checks (reinstall is separate).
     else:
         print("OK  install_skew: false")
-
-    # Deprecated vendored copies: warn but do not fail.
-    vendored = []
-    if (project / "runguard.py").exists():
-        vendored.append("runguard.py")
-    if (project / "watch_chat.py").exists():
-        vendored.append("watch_chat.py")
-    if vendored:
-        print()
-        print(
-            "WARN deprecated vendored product files in project: "
-            + ", ".join(vendored)
-        )
-        print(
-            "     Prefer package imports: "
-            "from observer_kit.runguard import start_observed_run"
-        )
-        print("     Remove the copies after migrating workflows.")
 
     if not ok:
         print()
@@ -1371,517 +1140,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 # --- AXI (agent eXperience interface) -----------------------------------------
 
+
 def cmd_axi(args: argparse.Namespace) -> int:
     """Agent-ergonomic surface: TOON stdout, next-step help, no interactive prompts."""
-    action = getattr(args, "axi_command", None) or "home"
-    state_dir = Path(getattr(args, "state_dir", ".observer") or ".observer")
-    state_dir = state_dir.expanduser().resolve()
-
-    if action == "home":
-        return _axi_home(state_dir, port=getattr(args, "port", 8484))
-    if action == "runs":
-        return _axi_runs(state_dir)
-    if action == "run":
-        return _axi_run_detail(
-            state_dir, getattr(args, "id", None) or getattr(args, "run_id", None)
-        )
-    if action == "attention":
-        return _axi_attention(
-            state_dir,
-            getattr(args, "id", None),
-            limit=int(getattr(args, "limit", 20) or 20),
-        )
-    if action == "sample-status":
-        return _axi_sample_status(state_dir, getattr(args, "id", None))
-    if action == "controls":
-        return _axi_controls(state_dir, getattr(args, "id", None))
-    if action == "chat":
-        return _axi_chat(
-            state_dir,
-            getattr(args, "id", None),
-            since=getattr(args, "since", None),
-            limit=int(getattr(args, "limit", 50) or 50),
-        )
-    if action == "doctor":
-        return _axi_doctor(
-            Path(getattr(args, "project", ".") or "."),
-            getattr(args, "state_dir_name", None) or state_dir.name,
-        )
-    if action == "ps":
-        return _axi_ps(state_dir, scan=not getattr(args, "no_scan", False))
-    if action == "help":
-        return _axi_help()
-    # Unknown subcommand should not reach here (argparse), but fail loud.
-    from observer_kit.axi import emit, toon_help, toon_kv
-    emit(
-        toon_kv("error", f"unknown axi command: {action}"),
-        toon_help(["observer-kit axi help"]),
-    )
-    return 2
-
-
-def _axi_home(state_dir: Path, *, port: int = 8484) -> int:
-    from observer_kit import detect_install_skew, version_info
-    from observer_kit.axi import (
-        AXI_SCHEMA,
-        default_help,
-        emit,
-        list_runs,
-        probe_dashboard,
-        toon_help,
-        toon_kv,
-        toon_table,
-    )
-
-    runs = list_runs(state_dir) if state_dir.is_dir() else []
-    live_runs = [r for r in runs if r.get("live")]
-    dashboards = _dashboard_records(
-        [state_dir] if state_dir.is_dir() else None, scan_ports=True
-    )
-    watchers = _watcher_records(state_dir) if state_dir.is_dir() else []
-    orphans = sum(1 for r in dashboards + watchers if r.get("orphan"))
-    dash = probe_dashboard(port)
-    if dash is None:
-        for rec in dashboards:
-            if rec.get("pid_alive") and rec.get("port"):
-                dash = {
-                    "port": rec.get("port"),
-                    "state_dir": rec.get("state_dir"),
-                    "pid": rec.get("pid"),
-                }
-                break
-
-    ver = version_info()
-    skew = detect_install_skew()
-    blocks = [
-        toon_kv("surface", "observer-axi"),
-        toon_kv("axi_schema", AXI_SCHEMA),
-        toon_kv("version", ver["version"]),
-        toon_kv("git_sha", ver["git_sha"]),
-        toon_kv(
-            "state_dir",
-            str(state_dir) if state_dir.is_dir() else f"missing:{state_dir}",
-        ),
-        toon_kv("state_ok", state_dir.is_dir()),
-        toon_kv("runs", len(runs)),
-        toon_kv("live", len(live_runs)),
-        toon_kv("orphans", orphans),
-        toon_kv("install_skew", bool(skew.get("install_skew"))),
-        toon_kv(
-            "dashboard",
-            f"http://127.0.0.1:{dash.get('port')}/"
-            if dash and dash.get("port")
-            else "none",
-        ),
-    ]
-    if skew.get("install_skew"):
-        blocks.append(toon_kv("skew_reason", skew.get("reason") or "path/package mismatch"))
-        blocks.append(toon_kv("upgrade", skew.get("upgrade") or "python3 -m pip install -e ."))
-
-    if live_runs:
-        blocks.append(
-            toon_table(
-                "live_runs",
-                live_runs[:10],
-                ["id", "status", "records", "desc"],
-            )
-        )
-    elif runs:
-        blocks.append(
-            toon_table(
-                "recent_runs",
-                runs[:5],
-                ["id", "live", "status", "records", "desc"],
-            )
-        )
-    else:
-        # Definitive empty state (not prose "No runs.")
-        blocks.append(toon_table("recent_runs", [], ["id", "live", "status", "records", "desc"]))
-
-    if orphans:
-        blocks.append(toon_kv("orphan_note", f"{orphans} orphan process(es)"))
-
-    live_id = live_runs[0]["id"] if live_runs else None
-    helps = default_help(
-        str(state_dir), live=len(live_runs), orphans=orphans
-    )
-    # real_help_commands accepts run_id via kwargs through default_help only if we pass it —
-    # inject live run id for copy-pastable poll when live.
-    if live_id:
-        from observer_kit.axi import real_help_commands
-        helps = real_help_commands(
-            str(state_dir), live=len(live_runs), orphans=orphans, run_id=live_id
-        )
-    if not state_dir.is_dir():
-        helps = [
-            f"observer-kit init . --state-dir {state_dir.name}",
-            skew.get("upgrade") or "python3 -m pip install -e .",
-            "observer-kit axi doctor .",
-        ]
-    if skew.get("install_skew"):
-        helps = [str(skew.get("upgrade") or "python3 -m pip install -e .")] + [
-            h for h in helps if "pip install" not in h
-        ]
-        helps.append("python3 -m observer_kit axi help")
-    blocks.append(toon_help(helps))
-    emit(*blocks)
-    return 0 if state_dir.is_dir() else 1
-
-
-def _axi_runs(state_dir: Path) -> int:
-    from observer_kit.axi import default_help, emit, list_runs, toon_help, toon_kv, toon_table
-
-    if not state_dir.is_dir():
-        emit(
-            toon_kv("error", "state_dir_missing"),
-            toon_kv("state_dir", str(state_dir)),
-            toon_help([f"observer-kit init . --state-dir {state_dir.name}"]),
-        )
-        return 1
-    runs = list_runs(state_dir)
-    emit(
-        toon_kv("state_dir", str(state_dir)),
-        toon_kv("count", len(runs)),
-        toon_table("runs", runs, ["id", "live", "status", "records", "desc"]),
-        toon_help(default_help(str(state_dir), live=sum(1 for r in runs if r.get("live")))),
-    )
-    return 0
-
-
-def _axi_run_detail(state_dir: Path, run_id: str | None) -> int:
-    from observer_kit.axi import (
-        emit,
-        real_help_commands,
-        run_detail,
-        toon_help,
-        toon_kv,
-        toon_table,
-    )
-
-    if not run_id:
-        emit(
-            toon_kv("error", "run_id_required"),
-            toon_kv("state_dir", str(state_dir)),
-            toon_help([f"observer-kit axi runs --state-dir {state_dir}"]),
-        )
-        return 2
-    if not state_dir.is_dir():
-        emit(
-            toon_kv("error", "state_dir_missing"),
-            toon_kv("state_dir", str(state_dir)),
-        )
-        return 1
-    detail = run_detail(state_dir, run_id)
-    if not detail:
-        emit(
-            toon_kv("error", "run_not_found"),
-            toon_kv("run", run_id),
-            toon_kv("state_dir", str(state_dir)),
-            toon_help([f"observer-kit axi runs --state-dir {state_dir}"]),
-        )
-        return 1
-    attention = detail.get("attention") or []
-    blocks = [
-        toon_kv("state_dir", str(state_dir)),
-        toon_kv("id", detail["id"]),
-        toon_kv("lane", detail["lane"]),
-        toon_kv("live", detail["live"]),
-        toon_kv("status", detail["status"]),
-        toon_kv("records", detail["records"]),
-        toon_kv("error_count", detail.get("error_count") or 0),
-        toon_kv("last_event", detail.get("last_event") or "none"),
-        toon_kv("desc", detail["desc"]),
-        toon_kv("mtime", detail["mtime"]),
-        toon_kv("dry_run", detail.get("dry_run")),
-        toon_kv("sample_finished", bool(detail.get("sample_finished"))),
-        toon_kv("full_run_started", bool(detail.get("full_run_started"))),
-        toon_kv("lock_pid", detail.get("lock_pid")),
-        toon_kv("lock_alive", bool(detail.get("lock_alive"))),
-        toon_kv("pending_writes", detail.get("pending_writes") or 0),
-        toon_kv("unreceipted_intents", detail.get("unreceipted_intents") or 0),
-        toon_table("attention", attention, ["key", "error"]),
-        toon_help(
-            real_help_commands(
-                str(state_dir),
-                live=1 if detail.get("live") else 0,
-                run_id=detail["id"],
-            )
-        ),
-    ]
-    if detail.get("status") == "unknown" and detail.get("status_reason"):
-        blocks.insert(5, toon_kv("status_reason", detail["status_reason"]))
-    emit(*blocks)
-    return 0
-
-
-def _axi_attention(state_dir: Path, run_id: str | None, *, limit: int = 20) -> int:
-    from observer_kit.axi import (
-        attention_rows,
-        emit,
-        get_run,
-        toon_help,
-        toon_kv,
-        toon_table,
-    )
-
-    if not run_id:
-        emit(
-            toon_kv("error", "run_id_required"),
-            toon_help([f"observer-kit axi runs --state-dir {state_dir}"]),
-        )
-        return 2
-    if not state_dir.is_dir():
-        emit(toon_kv("error", "state_dir_missing"), toon_kv("state_dir", str(state_dir)))
-        return 1
-    run = get_run(state_dir, run_id)
-    if not run:
-        emit(
-            toon_kv("error", "run_not_found"),
-            toon_kv("run", run_id),
-            toon_help([f"observer-kit axi runs --state-dir {state_dir}"]),
-        )
-        return 1
-    path = Path(str(run.get("events_path") or ""))
-    rows = attention_rows(path, limit=limit) if path.is_file() else []
-    emit(
-        toon_kv("state_dir", str(state_dir)),
-        toon_kv("id", run["id"]),
-        toon_kv("count", len(rows)),
-        toon_table("attention", rows, ["key", "error"]),
-        toon_help([
-            f"observer-kit axi run --state-dir {state_dir} --id {run['id']}",
-            f"observer-kit poll {state_dir} --run {run['id']}",
-        ]),
-    )
-    return 0
-
-
-def _axi_sample_status(state_dir: Path, run_id: str | None) -> int:
-    from observer_kit.axi import emit, sample_status, toon_help, toon_kv, toon_table
-
-    if not run_id:
-        emit(
-            toon_kv("error", "run_id_required"),
-            toon_help([f"observer-kit axi runs --state-dir {state_dir}"]),
-        )
-        return 2
-    if not state_dir.is_dir():
-        emit(toon_kv("error", "state_dir_missing"), toon_kv("state_dir", str(state_dir)))
-        return 1
-    status = sample_status(state_dir, run_id)
-    if not status:
-        emit(
-            toon_kv("error", "run_not_found"),
-            toon_kv("run", run_id),
-            toon_help([f"observer-kit axi runs --state-dir {state_dir}"]),
-        )
-        return 1
-    outcome_rows = [
-        {"status": k, "count": v} for k, v in sorted((status.get("outcomes") or {}).items())
-    ]
-    emit(
-        toon_kv("state_dir", str(state_dir)),
-        toon_kv("id", status["id"]),
-        toon_kv("status", status["status"]),
-        toon_kv("dry_run_started", status["dry_run_started"]),
-        toon_kv("sample_finished", status["sample_finished"]),
-        toon_kv("approval_recorded", status["approval_recorded"]),
-        toon_kv("approval_pending", status["approval_pending"]),
-        toon_kv("records", status["records"]),
-        toon_table("outcomes", outcome_rows, ["status", "count"]),
-        toon_help([
-            f"observer-kit axi run --state-dir {state_dir} --id {status['id']}",
-            f"observer-kit dashboard {state_dir}",
-        ]),
-    )
-    return 0
-
-
-def _axi_controls(state_dir: Path, run_id: str | None) -> int:
-    from observer_kit.axi import emit, get_run, list_controls, toon_help, toon_kv, toon_table
-
-    if not run_id:
-        emit(
-            toon_kv("error", "run_id_required"),
-            toon_help([f"observer-kit axi runs --state-dir {state_dir}"]),
-        )
-        return 2
-    if not state_dir.is_dir():
-        emit(toon_kv("error", "state_dir_missing"), toon_kv("state_dir", str(state_dir)))
-        return 1
-    run = get_run(state_dir, run_id)
-    if not run:
-        emit(
-            toon_kv("error", "run_not_found"),
-            toon_kv("run", run_id),
-            toon_help([f"observer-kit axi runs --state-dir {state_dir}"]),
-        )
-        return 1
-    rows = list_controls(state_dir, run_id)
-    pending = [r for r in rows if not r.get("acked")]
-    emit(
-        toon_kv("state_dir", str(state_dir)),
-        toon_kv("id", run["id"]),
-        toon_kv("pending", len(pending)),
-        toon_table("controls", rows, ["id", "kind", "acked", "ts", "note"]),
-        toon_help([
-            f"observer-kit axi run --state-dir {state_dir} --id {run['id']}",
-            f"observer-kit dashboard {state_dir}",
-        ]),
-    )
-    return 0
-
-
-def _axi_chat(state_dir: Path, run_id: str | None, *, since: str | None = None,
-              limit: int = 50) -> int:
-    from observer_kit.axi import emit, get_run, list_chat, toon_help, toon_kv, toon_table
-
-    if not run_id:
-        emit(
-            toon_kv("error", "run_id_required"),
-            toon_help([f"observer-kit axi runs --state-dir {state_dir}"]),
-        )
-        return 2
-    if not state_dir.is_dir():
-        emit(toon_kv("error", "state_dir_missing"), toon_kv("state_dir", str(state_dir)))
-        return 1
-    run = get_run(state_dir, run_id)
-    rid = run["id"] if run else run_id
-    rows = list_chat(state_dir, rid, since=since, limit=limit)
-    emit(
-        toon_kv("state_dir", str(state_dir)),
-        toon_kv("id", rid),
-        toon_kv("count", len(rows)),
-        toon_table("chat", rows, ["ts", "author", "kind", "anchor", "text"]),
-        toon_help([
-            f"observer-kit poll {state_dir} --run {rid}",
-            f"observer-kit reply {state_dir} --run {rid} --text \"...\"",
-        ]),
-    )
-    return 0
-
-
-def _axi_doctor(project: Path, state_name: str) -> int:
-    from observer_kit import detect_install_skew, version_info
-    from observer_kit.axi import emit, toon_help, toon_kv, toon_table
-
-    project = project.expanduser().resolve()
-    state = project / state_name
-    ver = version_info()
-    skew = detect_install_skew()
-    checks = [
-        {"check": "project_exists", "ok": project.exists()},
-        {"check": "package_runguard", "ok": package_file("runguard.py").exists()},
-        {"check": "package_dashboard", "ok": package_file("run_dashboard.py").exists()},
-        {"check": "package_watcher", "ok": package_file("watch_chat.py").exists()},
-        {"check": "state_dir", "ok": state.exists()},
-        {"check": "state_gitignore", "ok": (state / ".gitignore").exists()},
-        {"check": "explain", "ok": (state / "EXPLAIN.md").exists()},
-        {"check": "runs_home", "ok": (state / "runs").is_dir()},
-    ]
-    ok = all(c["ok"] for c in checks)
-    helps = (
-        [f"observer-kit init {project}", str(skew.get("upgrade") or "python -m pip install -e .")]
-        if not ok
-        else [
-            f"observer-kit axi --state-dir {state}",
-            f"observer-kit dashboard {state}",
-        ]
-    )
-    if skew.get("install_skew"):
-        helps = [str(skew.get("upgrade")), "python3 -m observer_kit axi help"] + list(helps)
-    emit(
-        toon_kv("project", str(project)),
-        toon_kv("state_dir", str(state)),
-        toon_kv("version", ver["version"]),
-        toon_kv("git_sha", ver["git_sha"]),
-        toon_kv("install_skew", bool(skew.get("install_skew"))),
-        toon_kv("upgrade", skew.get("upgrade") or ""),
-        toon_kv("ok", ok),
-        toon_table("checks", checks, ["check", "ok"]),
-        toon_help(helps),
-    )
-    return 0 if ok else 1
-
-
-def _axi_ps(state_dir: Path, *, scan: bool) -> int:
-    from observer_kit.axi import emit, toon_help, toon_kv, toon_table
-
-    dirs = [state_dir] if state_dir.is_dir() else []
-    dashboards = _dashboard_records(dirs or None, scan_ports=scan)
-    watchers = _watcher_records(state_dir) if state_dir.is_dir() else []
-    dash_rows = [
-        {
-            "port": d.get("port"),
-            "pid": d.get("pid"),
-            "parent_alive": (
-                _pid_alive(d.get("parent_pid")) if d.get("parent_pid") is not None else True
-            ),
-            "orphan": bool(d.get("orphan")),
-            "state_dir": d.get("state_dir"),
-        }
-        for d in dashboards
-    ]
-    watch_rows = [
-        {
-            "pid": w.get("pid"),
-            "parent_alive": (
-                _pid_alive(w.get("parent_pid")) if w.get("parent_pid") is not None else True
-            ),
-            "orphan": bool(w.get("orphan")),
-            "target": "all" if w.get("mode") == "all" else w.get("run"),
-            "state_dir": w.get("state_dir"),
-        }
-        for w in watchers
-    ]
-    orphans = sum(1 for r in dash_rows + watch_rows if r.get("orphan"))
-    emit(
-        toon_kv("state_dir", str(state_dir)),
-        toon_kv("dashboards", len(dash_rows)),
-        toon_kv("watchers", len(watch_rows)),
-        toon_kv("orphans", orphans),
-        toon_table(
-            "dashboard",
-            dash_rows,
-            ["port", "pid", "parent_alive", "orphan", "state_dir"],
-        ),
-        toon_table(
-            "watcher",
-            watch_rows,
-            ["pid", "parent_alive", "orphan", "target", "state_dir"],
-        ),
-        toon_help(
-            [f"observer-kit stop --sweep {state_dir}"]
-            if orphans
-            else [
-                f"observer-kit axi --state-dir {state_dir}",
-                f"observer-kit dashboard {state_dir}",
-            ]
-        ),
-    )
-    return 0
-
-
-def _axi_help() -> int:
-    from observer_kit import detect_install_skew, version_info
-    from observer_kit.axi import AXI_SCHEMA, axi_help_catalog, emit, toon_help, toon_kv
-
-    ver = version_info()
-    skew = detect_install_skew()
-    blocks = [
-        toon_kv("surface", "observer-axi"),
-        toon_kv("axi_schema", AXI_SCHEMA),
-        toon_kv("version", ver["version"]),
-        toon_kv("git_sha", ver["git_sha"]),
-        toon_kv("desc", "Agent eXperience Interface for Observer Kit"),
-        toon_kv("install_skew", bool(skew.get("install_skew"))),
-        toon_help(axi_help_catalog()),
-    ]
-    if skew.get("install_skew"):
-        blocks.insert(-1, toon_kv("upgrade", skew.get("upgrade") or ""))
-        blocks.insert(-1, toon_kv("skew_reason", skew.get("reason") or ""))
-    emit(*blocks)
-    return 0
+    from observer_kit.axi import dispatch
+    return dispatch(args)
 
 
 def cmd_scaffold(args: argparse.Namespace) -> int:
@@ -2021,23 +1284,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Agents: use observer-kit axi help. Humans: observer-kit dashboard.\n"
             "Initialize and run Observer Kit guardrails for risky batch scripts."
         ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""examples:
-  observer-kit axi help
-  observer-kit axi --state-dir .observer
-  observer-kit init .
-  observer-kit dashboard .observer
-  observer-kit poll .observer --run runguard:my-run
-  observer-kit watch .observer --all --follow
-  observer-kit run --state-dir .observer -- python3 workflow.py --dry-run --limit 10
-  observer-kit ps .observer
-  observer-kit stop --sweep .observer
-  observer-kit validate-flow pipeline.flow.json
-  observer-kit scaffold workflow --dest workflow.py --source sheet:leads
-  observer-kit test
-
-exit codes: 0 ok | 1 not found/failed check | 2 usage | 3 lock | 4 approval | 130 interrupt
-""",
+        epilog="""example: observer-kit axi help""",
     )
     parser.add_argument(
         "--version",
@@ -2049,102 +1296,46 @@ exit codes: 0 ok | 1 not found/failed check | 2 usage | 3 lock | 4 approval | 13
     axi = sub.add_parser(
         "axi",
         help="agent eXperience interface (TOON stdout, next-step help)",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""AXI is for agents: dense TOON on stdout, no interactive prompts.
-
-examples:
-  observer-kit axi
-  observer-kit axi --state-dir .observer
-  observer-kit axi runs --state-dir .observer
-  observer-kit axi run --state-dir .observer --id runguard:my-lane
-  observer-kit axi attention --state-dir .observer --id runguard:my-lane
-  observer-kit axi sample-status --state-dir .observer --id runguard:my-lane
-  observer-kit axi doctor .
-  observer-kit axi ps --state-dir .observer
-  observer-kit axi help
-
-Human visual review stays on the dashboard:
-  observer-kit dashboard .observer
-""",
+        epilog="AXI is for agents: dense TOON on stdout, no interactive prompts.",
     )
-    axi.add_argument(
-        "--state-dir",
-        default=".observer",
-        help="ledger/state directory (default .observer)",
-    )
-    axi.add_argument(
-        "--port",
-        type=int,
-        default=8484,
-        help="dashboard port to probe for home view",
-    )
+    axi.add_argument("--state-dir", default=".observer", help="ledger/state directory")
+    axi.add_argument("--port", type=int, default=8484, help="dashboard port for home view")
     axi_sub = axi.add_subparsers(dest="axi_command")
 
-    axi_home = axi_sub.add_parser("home", help="home view (default when no subcommand)")
-    axi_home.set_defaults(axi_command="home")
+    def _axi_cmd(name: str, help_text: str, *, state: bool = False, run_id: bool = False,
+                 limit: bool = False, since: bool = False) -> argparse.ArgumentParser:
+        p = axi_sub.add_parser(name, help=help_text)
+        if state:
+            p.add_argument("--state-dir", default=".observer")
+        if run_id:
+            p.add_argument("--id", dest="id", required=True, help="run id, e.g. runguard:lane")
+        if since:
+            p.add_argument("--since", default=None, help="only notes after this ts")
+        if limit:
+            p.add_argument("--limit", type=int, default=20 if name == "attention" else 50)
+        p.set_defaults(axi_command=name)
+        return p
 
-    axi_runs = axi_sub.add_parser("runs", help="list runs in a state dir")
-    axi_runs.add_argument("--state-dir", default=".observer")
-    axi_runs.set_defaults(axi_command="runs")
-
-    axi_run = axi_sub.add_parser("run", help="detail one run")
-    axi_run.add_argument("--state-dir", default=".observer")
-    axi_run.add_argument("--id", dest="id", required=True, help="run id, e.g. runguard:lane")
-    axi_run.set_defaults(axi_command="run")
-
-    axi_att = axi_sub.add_parser("attention", help="rows with non-empty error")
-    axi_att.add_argument("--state-dir", default=".observer")
-    axi_att.add_argument("--id", dest="id", required=True)
-    axi_att.add_argument("--limit", type=int, default=20)
-    axi_att.set_defaults(axi_command="attention")
-
-    axi_sample = axi_sub.add_parser(
-        "sample-status", help="dry-run / approval readiness for a run"
-    )
-    axi_sample.add_argument("--state-dir", default=".observer")
-    axi_sample.add_argument("--id", dest="id", required=True)
-    axi_sample.set_defaults(axi_command="sample-status")
-
-    axi_ctrl = axi_sub.add_parser("controls", help="pending pause/stop/approve + ack state")
-    axi_ctrl.add_argument("--state-dir", default=".observer")
-    axi_ctrl.add_argument("--id", dest="id", required=True)
-    axi_ctrl.set_defaults(axi_command="controls")
-
-    axi_chat = axi_sub.add_parser("chat", help="structured notes without long-poll")
-    axi_chat.add_argument("--state-dir", default=".observer")
-    axi_chat.add_argument("--id", dest="id", required=True)
-    axi_chat.add_argument("--since", default=None, help="only notes after this ts")
-    axi_chat.add_argument("--limit", type=int, default=50)
-    axi_chat.set_defaults(axi_command="chat")
-
-    axi_doc = axi_sub.add_parser("doctor", help="TOON doctor for a project")
+    _axi_cmd("home", "home view (default when no subcommand)")
+    _axi_cmd("runs", "list runs in a state dir", state=True)
+    _axi_cmd("run", "detail one run", state=True, run_id=True)
+    _axi_cmd("attention", "rows with non-empty error", state=True, run_id=True, limit=True)
+    _axi_cmd("sample-status", "dry-run / approval readiness", state=True, run_id=True)
+    _axi_cmd("controls", "pending pause/stop/approve + ack", state=True, run_id=True)
+    _axi_cmd("chat", "structured notes without long-poll", state=True, run_id=True,
+             since=True, limit=True)
+    axi_doc = _axi_cmd("doctor", "TOON doctor for a project")
     axi_doc.add_argument("project", nargs="?", default=".")
     axi_doc.add_argument("--state-dir", dest="state_dir_name", default=".observer")
-    axi_doc.set_defaults(axi_command="doctor")
-
-    axi_ps = axi_sub.add_parser("ps", help="TOON process inventory")
-    axi_ps.add_argument("--state-dir", default=".observer")
+    axi_ps = _axi_cmd("ps", "TOON process inventory", state=True)
     axi_ps.add_argument("--no-scan", action="store_true")
-    axi_ps.set_defaults(axi_command="ps")
-
-    axi_help = axi_sub.add_parser("help", help="concise AXI command list")
-    axi_help.set_defaults(axi_command="help")
-
+    _axi_cmd("help", "concise AXI command list")
     axi.set_defaults(func=cmd_axi, axi_command="home")
 
     init = sub.add_parser(
         "init",
         help="create .observer state home (package provides runtime)",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""examples:
-  observer-kit init .
-  observer-kit init ./my-project --force
-
-next:
-  observer-kit dashboard ./my-project/.observer
-  observer-kit watch ./my-project/.observer --all --follow
-  # from observer_kit.runguard import start_observed_run
-""",
+        epilog="""example: observer-kit init .""",
     )
     init.add_argument("project", nargs="?", default=".", help="target project directory")
     init.add_argument("--state-dir", default=".observer", help="state directory inside the project")
@@ -2153,14 +1344,7 @@ next:
                       help="do not copy EXPLAIN.md into the state dir")
     init.add_argument("--no-gitignore", dest="gitignore", action="store_false",
                       help="do not write a state-dir .gitignore")
-    init.add_argument(
-        "--vendor",
-        action="store_true",
-        help="(deprecated) copy runguard.py/watch_chat.py into the project",
-    )
-    init.add_argument("--no-watch", dest="watch", action="store_false",
-                      help="with --vendor, skip watch_chat.py")
-    init.set_defaults(func=cmd_init, explain=True, gitignore=True, watch=True, vendor=False)
+    init.set_defaults(func=cmd_init, explain=True, gitignore=True)
 
     lint = sub.add_parser(
         "lint",
@@ -2172,7 +1356,6 @@ next:
     validate_flow = sub.add_parser(
         "validate-flow",
         help="validate an Observer Flow JSON manifest (structure + plan hash)",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
   observer-kit validate-flow pipeline.flow.json
   observer-kit validate-flow pipeline.flow.json --json
@@ -2187,12 +1370,7 @@ next:
     gate = sub.add_parser(
         "gate",
         help="side-effect compliance gate (force Observer Kit when needed)",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""examples:
-  observer-kit gate path/to/script.py
-  observer-kit gate --command 'python3 enrich.py --full-run'
-  # Claude Code PreToolUse: .claude/hooks/observer-gate.sh
-""",
+        epilog="""example: observer-kit gate path/to/script.py""",
     )
     gate.add_argument("path", nargs="?", help="script path to assess")
     gate.add_argument("--command", help="shell command to assess")
@@ -2202,21 +1380,7 @@ next:
     dash = sub.add_parser(
         "dashboard",
         help="run the localhost dashboard",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""examples:
-  observer-kit dashboard .observer
-  observer-kit dashboard ./my-project/.observer --port 8485
-
-  # Bind lifetime to this shell (exits when the shell dies):
-  observer-kit dashboard .observer --parent-pid $$
-
-  # Auto-exit after 30 minutes with no browser/API traffic:
-  observer-kit dashboard .observer --idle-timeout 1800
-
-For long-lived monitoring, keep this server running and launch pipelines in
-separate shells with observer-kit run --state-dir <same-dir> ...
-Inventory/reap: observer-kit ps ; observer-kit stop --orphans
-""",
+        epilog="""example: observer-kit dashboard .observer""",
     )
     dash.add_argument("state_dir", nargs="?", default=".observer", help="ledger/state directory")
     dash.add_argument("--port", type=int, default=8484, help="dashboard port")
@@ -2238,12 +1402,7 @@ Inventory/reap: observer-kit ps ; observer-kit stop --orphans
     ps = sub.add_parser(
         "ps",
         help="list Observer dashboards and watchers (flags orphans)",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""examples:
-  observer-kit ps
-  observer-kit ps .observer
-  observer-kit ps .observer /tmp/other/.observer
-""",
+        epilog="""example: observer-kit ps""",
     )
     ps.add_argument(
         "state_dir",
@@ -2267,21 +1426,7 @@ Inventory/reap: observer-kit ps ; observer-kit stop --orphans
     stop = sub.add_parser(
         "stop",
         help="stop Observer dashboards/watchers (orphans by default)",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""examples:
-  # Reap dashboards/watchers whose parent PID is dead:
-  observer-kit stop --orphans
-  observer-kit stop --orphans .observer
-
-  # Stop everything for a state dir (including intentional long-lived):
-  observer-kit stop --all .observer
-
-  # Stop one port:
-  observer-kit stop --port 8485 --all
-
-  # Dry run:
-  observer-kit stop --orphans --dry-run
-""",
+        epilog="""example: observer-kit stop --orphans""",
     )
     stop.add_argument(
         "state_dir",
@@ -2327,22 +1472,7 @@ Inventory/reap: observer-kit ps ; observer-kit stop --orphans
     watch = sub.add_parser(
         "watch",
         help="bridge dashboard chat to stdout for the active harness",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""examples:
-  # Preferred with a long-lived dashboard: bridge notes from any run.
-  observer-kit watch .observer --all --follow
-
-  # Scoped bridge for one run id.
-  observer-kit watch .observer --run runguard:my-run --follow
-
-The watcher is transport only. It emits OBSERVER_CHAT_EVENT lines; the harness
-session remains responsible for inspecting data, editing scripts, rerunning,
-and replying.
-
-Long-lived followers register ownership in the state directory. The same run
-reuses one watcher, different run IDs remain independent, and --all is the
-single-session project-wide mode.
-""",
+        epilog="""example: observer-kit watch .observer --all --follow""",
     )
     watch.add_argument("state_dir", nargs="?", default=".observer", help="ledger/state directory")
     watch.add_argument("--run", help="run id, e.g. runguard:my-run")
@@ -2359,14 +1489,7 @@ single-session project-wide mode.
     reply = sub.add_parser(
         "reply",
         help="write an agent reply into dashboard chat",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""example:
-  observer-kit reply .observer \\
-    --run runguard:my-run \\
-    --anchor 'cell:companies::acme|companies::status' \\
-    --resolved \\
-    --text "Fixed the parser and reran the sample."
-""",
+        epilog="""example:""",
     )
     reply.add_argument("state_dir", nargs="?", default=".observer", help="ledger/state directory")
     reply.add_argument("--run", required=True, help="run id to reply to")
@@ -2378,12 +1501,7 @@ single-session project-wide mode.
     agent_status = sub.add_parser(
         "agent-status",
         help="mark agent presence: listening, responding, or idle",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""examples:
-  observer-kit agent-status .observer --run runguard:my-run --listening
-  observer-kit agent-status .observer --run runguard:my-run --responding
-  observer-kit agent-status .observer --run runguard:my-run --idle
-""",
+        epilog="""example: observer-kit agent-status .observer --run runguard:my-run --listening""",
     )
     agent_status.add_argument("state_dir", nargs="?", default=".observer",
                               help="ledger/state directory")
@@ -2400,23 +1518,7 @@ single-session project-wide mode.
     poll = sub.add_parser(
         "poll",
         help="long-poll for dashboard notes (AXI-style agent respond loop)",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""examples:
-  # Leave running while the operator reviews the dashboard.
-  observer-kit poll .observer --run runguard:scroll-demo
-
-  # After acting, reply and listen again (Lavish --agent-reply pattern).
-  observer-kit poll .observer --run runguard:scroll-demo \\
-    --reply "Fixed the parser and reran the sample." --resolved
-
-  # Project-wide bridge for one long-lived agent session.
-  observer-kit poll .observer --all
-
-Poll marks the run as listening so the dashboard shows agent presence. When a
-user note or control arrives it prints OBSERVER_CHAT_EVENT lines, flips to
-responding, and exits (unless --follow). Re-run poll after you reply. Notes are
-never lost if the poll times out — re-run with --include-existing if needed.
-""",
+        epilog="""example: observer-kit poll .observer --run runguard:scroll-demo""",
     )
     poll.add_argument("state_dir", nargs="?", default=".observer",
                       help="ledger/state directory")
@@ -2441,33 +1543,7 @@ never lost if the poll times out — re-run with --include-existing if needed.
     run = sub.add_parser(
         "run",
         help="run a command with Observer Kit state and watcher plumbing",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""examples:
-  # Dry-run sample in the current source lane.
-  observer-kit run --state-dir .observer -- python3 workflow.py --dry-run --limit 10
-
-  # Retry/fix/continue the same source data in the same dashboard run.
-  observer-kit run --state-dir .observer --session july-import \\
-    -- python3 workflow.py --full-run
-
-  # Start a separate comparison or new batch run.
-  observer-kit run --state-dir .observer --session auto \\
-    -- python3 workflow.py --full-run
-
-  # Quick demo: launch a temporary dashboard with this command.
-  observer-kit run --state-dir .observer --dashboard \\
-    -- python3 workflow.py --dry-run --limit 10
-
-For persistent monitoring, prefer:
-  observer-kit dashboard .observer
-  observer-kit watch .observer --all --follow
-  observer-kit run --state-dir .observer --session source-id -- ...
-
-Session rule:
-  same source retry/adaptation = reuse the same session or omit --session
-  add enrichment to existing rows = reuse the same session, table, and keys
-  clean comparison/new batch   = use --session auto or a new session name
-""",
+        epilog="""example: observer-kit run --state-dir .observer -- python3 workflow.py --dry-run --limit 10""",
     )
     run.add_argument("--state-dir", default=".observer", help="ledger/state directory")
     run.add_argument("--dashboard", action="store_true", help="start a dashboard for this run")
@@ -2494,7 +1570,6 @@ Session rule:
     scaffold = sub.add_parser(
         "scaffold",
         help="emit a minimal workflow.py + EXPLAIN seed",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
   observer-kit scaffold workflow --dest workflow.py --source sheet:leads --key id
   observer-kit scaffold workflow --dest enrich.py --paid-provider --external-destination
@@ -2527,7 +1602,6 @@ Session rule:
     test = sub.add_parser(
         "test",
         help="run runguard acceptance tests",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""example:
   observer-kit test
 """,
@@ -2537,15 +1611,7 @@ Session rule:
     doctor = sub.add_parser(
         "doctor",
         help="check a project for Observer Kit basics",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""examples:
-  observer-kit doctor .
-  observer-kit doctor ./my-project
-
-Doctor checks the substrate only: vendored runguard.py/watch_chat.py, state dir,
-and available dashboard/tests. It does not prove a workflow uses the guardrails
-correctly.
-""",
+        epilog="""example: observer-kit doctor .""",
     )
     doctor.add_argument("project", nargs="?", default=".", help="project directory")
     doctor.add_argument("--state-dir", default=".observer", help="state directory inside the project")

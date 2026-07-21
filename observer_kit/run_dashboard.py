@@ -26,6 +26,12 @@ import threading
 import time
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
+from observer_kit._util import (
+    lane_from_run_id as _lane_name,
+    pid_alive as _pid_alive,
+    timestamp as _timestamp,
+)
+
 # This is a run-once GLOBAL observer, not a per-project file to vendor. Point it at
 # any project's ledger dir — no editing needed:
 #     python3 run_dashboard.py /path/to/.observer          (positional arg)
@@ -187,14 +193,6 @@ def _iter_side_channel_paths(filename, run_id=None):
         seen.add(key)
         ordered.append(path)
     return ordered
-
-
-def _timestamp():
-    """UTC RFC 3339 with nanoseconds — matches runguard ordering/chat watermarks."""
-    ns = time.time_ns()
-    secs, nsec = divmod(ns, 1_000_000_000)
-    base = time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(secs))
-    return f'{base}.{nsec:09d}Z'
 
 
 def _summary_event(path):
@@ -371,25 +369,6 @@ def _is_run_ledger(filename):
             not filename.endswith('.receipts.jsonl'))
 
 
-def _lane_name(name):
-    """Normalize a run id or ledger name to a lane folder name.
-
-    Accepts ``runguard:<lane>``, ``runguard:<lane>.jsonl``, or a bare lane name.
-    """
-    raw = str(name or '').strip()
-    if not raw or raw == 'all':
-        return ''
-    _kind, sep, tail = raw.partition(':')
-    if sep:
-        raw = tail
-    raw = os.path.basename(raw)
-    if raw.endswith('.jsonl'):
-        raw = raw[:-6]
-    if not raw or raw in {'.', '..'}:
-        return ''
-    return raw
-
-
 def _path_under(root, candidate):
     """Return realpath of candidate when it is strictly inside root, else None."""
     root = os.path.realpath(root)
@@ -547,17 +526,6 @@ def list_runs():
             seen_paths.add(real_p)
     runs.sort(key=lambda r: -r['mtime'])
     return runs
-
-
-def _pid_alive(pid) -> bool:
-    try:
-        p = int(pid)
-        if p <= 0:
-            return False
-        os.kill(p, 0)
-        return True
-    except (TypeError, ValueError, OSError):
-        return False
 
 
 def locks():
@@ -1230,16 +1198,6 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_response(404)
             self.end_headers()
-
-
-def _pid_alive(pid):
-    if pid is None:
-        return False
-    try:
-        os.kill(int(pid), 0)
-        return True
-    except (OSError, TypeError, ValueError):
-        return False
 
 
 def _dashboard_meta_path(state_dir):

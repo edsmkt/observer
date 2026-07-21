@@ -23,6 +23,9 @@ from typing import Any, Iterable
 from urllib.error import URLError
 from urllib.request import urlopen
 
+from observer_kit._util import pid_alive as _pid_alive
+from observer_kit.inventory import dashboard_records, watcher_records
+
 # Stable exit codes for agents scripting AXI.
 EXIT_OK = 0
 EXIT_NOT_FOUND = 1
@@ -120,17 +123,6 @@ AXI_COMMANDS = (
     'ps',
     'help',
 )
-
-
-def _pid_alive(pid: object) -> bool:
-    try:
-        p = int(pid)  # type: ignore[arg-type]
-        if p <= 0:
-            return False
-        os.kill(p, 0)
-        return True
-    except (TypeError, ValueError, OSError):
-        return False
 
 
 def _read_jsonl_tail(path: Path, max_lines: int = 80) -> list[dict]:
@@ -703,3 +695,497 @@ def axi_help_catalog() -> list[str]:
         'observer-kit poll .observer --all',
         'observer-kit stop --sweep .observer',
     ]
+
+
+
+
+def substrate_checks(project: Path, state_name: str) -> list[dict]:
+    """Shared doctor substrate for human CLI and axi doctor."""
+    project = project.expanduser().resolve()
+    state = project / state_name
+    pkg = Path(__file__).resolve().parent
+    return [
+        {"check": "project_exists", "label": "project exists", "ok": project.exists()},
+        {"check": "package_runguard", "label": "package runguard available",
+         "ok": (pkg / "runguard.py").is_file()},
+        {"check": "package_dashboard", "label": "package dashboard available",
+         "ok": (pkg / "run_dashboard.py").is_file()},
+        {"check": "package_dashboard_asset", "label": "package dashboard asset available",
+         "ok": (pkg / "assets" / "dashboard.js").is_file()},
+        {"check": "package_watcher", "label": "package watcher available",
+         "ok": (pkg / "watch_chat.py").is_file()},
+        {"check": "state_dir", "label": "state dir exists", "ok": state.exists()},
+        {"check": "state_gitignore", "label": "state dir ignores local ledger data",
+         "ok": (state / ".gitignore").exists()},
+        {"check": "explain", "label": "operator explainer exists",
+         "ok": (state / "EXPLAIN.md").exists()},
+        {"check": "runs_home", "label": "runs/ home exists", "ok": (state / "runs").is_dir()},
+    ]
+
+
+# --- CLI dispatch (moved from cli.py) ----------------------------------------
+
+def dispatch(args) -> int:
+    """Agent-ergonomic surface: TOON stdout, next-step help, no interactive prompts."""
+    action = getattr(args, "axi_command", None) or "home"
+    state_dir = Path(getattr(args, "state_dir", ".observer") or ".observer")
+    state_dir = state_dir.expanduser().resolve()
+
+    if action == "home":
+        return _axi_home(state_dir, port=getattr(args, "port", 8484))
+    if action == "runs":
+        return _axi_runs(state_dir)
+    if action == "run":
+        return _axi_run_detail(
+            state_dir, getattr(args, "id", None) or getattr(args, "run_id", None)
+        )
+    if action == "attention":
+        return _axi_attention(
+            state_dir,
+            getattr(args, "id", None),
+            limit=int(getattr(args, "limit", 20) or 20),
+        )
+    if action == "sample-status":
+        return _axi_sample_status(state_dir, getattr(args, "id", None))
+    if action == "controls":
+        return _axi_controls(state_dir, getattr(args, "id", None))
+    if action == "chat":
+        return _axi_chat(
+            state_dir,
+            getattr(args, "id", None),
+            since=getattr(args, "since", None),
+            limit=int(getattr(args, "limit", 50) or 50),
+        )
+    if action == "doctor":
+        return _axi_doctor(
+            Path(getattr(args, "project", ".") or "."),
+            getattr(args, "state_dir_name", None) or state_dir.name,
+        )
+    if action == "ps":
+        return _axi_ps(state_dir, scan=not getattr(args, "no_scan", False))
+    if action == "help":
+        return _axi_help()
+    emit(
+        toon_kv("error", f"unknown axi command: {action}"),
+        toon_help(["observer-kit axi help"]),
+    )
+    return 2
+
+def _axi_home(state_dir: Path, *, port: int = 8484) -> int:
+    from observer_kit import detect_install_skew, version_info
+
+    runs = list_runs(state_dir) if state_dir.is_dir() else []
+    live_runs = [r for r in runs if r.get("live")]
+    dashboards = dashboard_records(
+        [state_dir] if state_dir.is_dir() else None, scan_ports=True
+    )
+    watchers = watcher_records(state_dir) if state_dir.is_dir() else []
+    orphans = sum(1 for r in dashboards + watchers if r.get("orphan"))
+    dash = probe_dashboard(port)
+    if dash is None:
+        for rec in dashboards:
+            if rec.get("pid_alive") and rec.get("port"):
+                dash = {
+                    "port": rec.get("port"),
+                    "state_dir": rec.get("state_dir"),
+                    "pid": rec.get("pid"),
+                }
+                break
+
+    ver = version_info()
+    skew = detect_install_skew()
+    blocks = [
+        toon_kv("surface", "observer-axi"),
+        toon_kv("axi_schema", AXI_SCHEMA),
+        toon_kv("version", ver["version"]),
+        toon_kv("git_sha", ver["git_sha"]),
+        toon_kv(
+            "state_dir",
+            str(state_dir) if state_dir.is_dir() else f"missing:{state_dir}",
+        ),
+        toon_kv("state_ok", state_dir.is_dir()),
+        toon_kv("runs", len(runs)),
+        toon_kv("live", len(live_runs)),
+        toon_kv("orphans", orphans),
+        toon_kv("install_skew", bool(skew.get("install_skew"))),
+        toon_kv(
+            "dashboard",
+            f"http://127.0.0.1:{dash.get('port')}/"
+            if dash and dash.get("port")
+            else "none",
+        ),
+    ]
+    if skew.get("install_skew"):
+        blocks.append(toon_kv("skew_reason", skew.get("reason") or "path/package mismatch"))
+        blocks.append(toon_kv("upgrade", skew.get("upgrade") or "python3 -m pip install -e ."))
+
+    if live_runs:
+        blocks.append(
+            toon_table(
+                "live_runs",
+                live_runs[:10],
+                ["id", "status", "records", "desc"],
+            )
+        )
+    elif runs:
+        blocks.append(
+            toon_table(
+                "recent_runs",
+                runs[:5],
+                ["id", "live", "status", "records", "desc"],
+            )
+        )
+    else:
+        # Definitive empty state (not prose "No runs.")
+        blocks.append(toon_table("recent_runs", [], ["id", "live", "status", "records", "desc"]))
+
+    if orphans:
+        blocks.append(toon_kv("orphan_note", f"{orphans} orphan process(es)"))
+
+    live_id = live_runs[0]["id"] if live_runs else None
+    helps = default_help(
+        str(state_dir), live=len(live_runs), orphans=orphans
+    )
+    # real_help_commands accepts run_id via kwargs through default_help only if we pass it —
+    # inject live run id for copy-pastable poll when live.
+    if live_id:
+        helps = real_help_commands(
+            str(state_dir), live=len(live_runs), orphans=orphans, run_id=live_id
+        )
+    if not state_dir.is_dir():
+        helps = [
+            f"observer-kit init . --state-dir {state_dir.name}",
+            skew.get("upgrade") or "python3 -m pip install -e .",
+            "observer-kit axi doctor .",
+        ]
+    if skew.get("install_skew"):
+        helps = [str(skew.get("upgrade") or "python3 -m pip install -e .")] + [
+            h for h in helps if "pip install" not in h
+        ]
+        helps.append("python3 -m observer_kit axi help")
+    blocks.append(toon_help(helps))
+    emit(*blocks)
+    return 0 if state_dir.is_dir() else 1
+
+
+def _axi_runs(state_dir: Path) -> int:
+
+    if not state_dir.is_dir():
+        emit(
+            toon_kv("error", "state_dir_missing"),
+            toon_kv("state_dir", str(state_dir)),
+            toon_help([f"observer-kit init . --state-dir {state_dir.name}"]),
+        )
+        return 1
+    runs = list_runs(state_dir)
+    emit(
+        toon_kv("state_dir", str(state_dir)),
+        toon_kv("count", len(runs)),
+        toon_table("runs", runs, ["id", "live", "status", "records", "desc"]),
+        toon_help(default_help(str(state_dir), live=sum(1 for r in runs if r.get("live")))),
+    )
+    return 0
+
+
+def _axi_run_detail(state_dir: Path, run_id: str | None) -> int:
+
+    if not run_id:
+        emit(
+            toon_kv("error", "run_id_required"),
+            toon_kv("state_dir", str(state_dir)),
+            toon_help([f"observer-kit axi runs --state-dir {state_dir}"]),
+        )
+        return 2
+    if not state_dir.is_dir():
+        emit(
+            toon_kv("error", "state_dir_missing"),
+            toon_kv("state_dir", str(state_dir)),
+        )
+        return 1
+    detail = run_detail(state_dir, run_id)
+    if not detail:
+        emit(
+            toon_kv("error", "run_not_found"),
+            toon_kv("run", run_id),
+            toon_kv("state_dir", str(state_dir)),
+            toon_help([f"observer-kit axi runs --state-dir {state_dir}"]),
+        )
+        return 1
+    attention = detail.get("attention") or []
+    fields = [
+        ("state_dir", str(state_dir)),
+        ("id", detail["id"]),
+        ("lane", detail["lane"]),
+        ("live", detail["live"]),
+        ("status", detail["status"]),
+        ("records", detail["records"]),
+        ("error_count", detail.get("error_count") or 0),
+        ("last_event", detail.get("last_event") or "none"),
+        ("desc", detail["desc"]),
+        ("mtime", detail["mtime"]),
+        ("dry_run", detail.get("dry_run")),
+        ("sample_finished", bool(detail.get("sample_finished"))),
+        ("full_run_started", bool(detail.get("full_run_started"))),
+        ("lock_pid", detail.get("lock_pid")),
+        ("lock_alive", bool(detail.get("lock_alive"))),
+        ("pending_writes", detail.get("pending_writes") or 0),
+        ("unreceipted_intents", detail.get("unreceipted_intents") or 0),
+    ]
+    if detail.get("status") == "unknown" and detail.get("status_reason"):
+        fields.insert(5, ("status_reason", detail["status_reason"]))
+    blocks = [toon_kv(k, v) for k, v in fields]
+    blocks.append(toon_table("attention", attention, ["key", "error"]))
+    blocks.append(toon_help(real_help_commands(
+        str(state_dir), live=1 if detail.get("live") else 0, run_id=detail["id"],
+    )))
+    emit(*blocks)
+    return 0
+
+
+def _axi_attention(state_dir: Path, run_id: str | None, *, limit: int = 20) -> int:
+
+    if not run_id:
+        emit(
+            toon_kv("error", "run_id_required"),
+            toon_help([f"observer-kit axi runs --state-dir {state_dir}"]),
+        )
+        return 2
+    if not state_dir.is_dir():
+        emit(toon_kv("error", "state_dir_missing"), toon_kv("state_dir", str(state_dir)))
+        return 1
+    run = get_run(state_dir, run_id)
+    if not run:
+        emit(
+            toon_kv("error", "run_not_found"),
+            toon_kv("run", run_id),
+            toon_help([f"observer-kit axi runs --state-dir {state_dir}"]),
+        )
+        return 1
+    path = Path(str(run.get("events_path") or ""))
+    rows = attention_rows(path, limit=limit) if path.is_file() else []
+    emit(
+        toon_kv("state_dir", str(state_dir)),
+        toon_kv("id", run["id"]),
+        toon_kv("count", len(rows)),
+        toon_table("attention", rows, ["key", "error"]),
+        toon_help([
+            f"observer-kit axi run --state-dir {state_dir} --id {run['id']}",
+            f"observer-kit poll {state_dir} --run {run['id']}",
+        ]),
+    )
+    return 0
+
+
+def _axi_sample_status(state_dir: Path, run_id: str | None) -> int:
+
+    if not run_id:
+        emit(
+            toon_kv("error", "run_id_required"),
+            toon_help([f"observer-kit axi runs --state-dir {state_dir}"]),
+        )
+        return 2
+    if not state_dir.is_dir():
+        emit(toon_kv("error", "state_dir_missing"), toon_kv("state_dir", str(state_dir)))
+        return 1
+    status = sample_status(state_dir, run_id)
+    if not status:
+        emit(
+            toon_kv("error", "run_not_found"),
+            toon_kv("run", run_id),
+            toon_help([f"observer-kit axi runs --state-dir {state_dir}"]),
+        )
+        return 1
+    outcome_rows = [
+        {"status": k, "count": v} for k, v in sorted((status.get("outcomes") or {}).items())
+    ]
+    emit(
+        toon_kv("state_dir", str(state_dir)),
+        toon_kv("id", status["id"]),
+        toon_kv("status", status["status"]),
+        toon_kv("dry_run_started", status["dry_run_started"]),
+        toon_kv("sample_finished", status["sample_finished"]),
+        toon_kv("approval_recorded", status["approval_recorded"]),
+        toon_kv("approval_pending", status["approval_pending"]),
+        toon_kv("records", status["records"]),
+        toon_table("outcomes", outcome_rows, ["status", "count"]),
+        toon_help([
+            f"observer-kit axi run --state-dir {state_dir} --id {status['id']}",
+            f"observer-kit dashboard {state_dir}",
+        ]),
+    )
+    return 0
+
+
+def _axi_controls(state_dir: Path, run_id: str | None) -> int:
+
+    if not run_id:
+        emit(
+            toon_kv("error", "run_id_required"),
+            toon_help([f"observer-kit axi runs --state-dir {state_dir}"]),
+        )
+        return 2
+    if not state_dir.is_dir():
+        emit(toon_kv("error", "state_dir_missing"), toon_kv("state_dir", str(state_dir)))
+        return 1
+    run = get_run(state_dir, run_id)
+    if not run:
+        emit(
+            toon_kv("error", "run_not_found"),
+            toon_kv("run", run_id),
+            toon_help([f"observer-kit axi runs --state-dir {state_dir}"]),
+        )
+        return 1
+    rows = list_controls(state_dir, run_id)
+    pending = [r for r in rows if not r.get("acked")]
+    emit(
+        toon_kv("state_dir", str(state_dir)),
+        toon_kv("id", run["id"]),
+        toon_kv("pending", len(pending)),
+        toon_table("controls", rows, ["id", "kind", "acked", "ts", "note"]),
+        toon_help([
+            f"observer-kit axi run --state-dir {state_dir} --id {run['id']}",
+            f"observer-kit dashboard {state_dir}",
+        ]),
+    )
+    return 0
+
+
+def _axi_chat(state_dir: Path, run_id: str | None, *, since: str | None = None,
+              limit: int = 50) -> int:
+
+    if not run_id:
+        emit(
+            toon_kv("error", "run_id_required"),
+            toon_help([f"observer-kit axi runs --state-dir {state_dir}"]),
+        )
+        return 2
+    if not state_dir.is_dir():
+        emit(toon_kv("error", "state_dir_missing"), toon_kv("state_dir", str(state_dir)))
+        return 1
+    run = get_run(state_dir, run_id)
+    rid = run["id"] if run else run_id
+    rows = list_chat(state_dir, rid, since=since, limit=limit)
+    emit(
+        toon_kv("state_dir", str(state_dir)),
+        toon_kv("id", rid),
+        toon_kv("count", len(rows)),
+        toon_table("chat", rows, ["ts", "author", "kind", "anchor", "text"]),
+        toon_help([
+            f"observer-kit poll {state_dir} --run {rid}",
+            f"observer-kit reply {state_dir} --run {rid} --text \"...\"",
+        ]),
+    )
+    return 0
+
+
+def _axi_doctor(project: Path, state_name: str) -> int:
+    from observer_kit import detect_install_skew, version_info
+
+    project = project.expanduser().resolve()
+    state = project / state_name
+    ver = version_info()
+    skew = detect_install_skew()
+    checks = substrate_checks(project, state_name)
+    ok = all(c["ok"] for c in checks)
+    helps = (
+        [f"observer-kit init {project}", str(skew.get("upgrade") or "python -m pip install -e .")]
+        if not ok
+        else [
+            f"observer-kit axi --state-dir {state}",
+            f"observer-kit dashboard {state}",
+        ]
+    )
+    if skew.get("install_skew"):
+        helps = [str(skew.get("upgrade")), "python3 -m observer_kit axi help"] + list(helps)
+    emit(
+        toon_kv("project", str(project)),
+        toon_kv("state_dir", str(state)),
+        toon_kv("version", ver["version"]),
+        toon_kv("git_sha", ver["git_sha"]),
+        toon_kv("install_skew", bool(skew.get("install_skew"))),
+        toon_kv("upgrade", skew.get("upgrade") or ""),
+        toon_kv("ok", ok),
+        toon_table("checks", checks, ["check", "ok"]),
+        toon_help(helps),
+    )
+    return 0 if ok else 1
+
+
+def _axi_ps(state_dir: Path, *, scan: bool) -> int:
+
+    dirs = [state_dir] if state_dir.is_dir() else []
+    dashboards = dashboard_records(dirs or None, scan_ports=scan)
+    watchers = watcher_records(state_dir) if state_dir.is_dir() else []
+    dash_rows = [
+        {
+            "port": d.get("port"),
+            "pid": d.get("pid"),
+            "parent_alive": (
+                _pid_alive(d.get("parent_pid")) if d.get("parent_pid") is not None else True
+            ),
+            "orphan": bool(d.get("orphan")),
+            "state_dir": d.get("state_dir"),
+        }
+        for d in dashboards
+    ]
+    watch_rows = [
+        {
+            "pid": w.get("pid"),
+            "parent_alive": (
+                _pid_alive(w.get("parent_pid")) if w.get("parent_pid") is not None else True
+            ),
+            "orphan": bool(w.get("orphan")),
+            "target": "all" if w.get("mode") == "all" else w.get("run"),
+            "state_dir": w.get("state_dir"),
+        }
+        for w in watchers
+    ]
+    orphans = sum(1 for r in dash_rows + watch_rows if r.get("orphan"))
+    emit(
+        toon_kv("state_dir", str(state_dir)),
+        toon_kv("dashboards", len(dash_rows)),
+        toon_kv("watchers", len(watch_rows)),
+        toon_kv("orphans", orphans),
+        toon_table(
+            "dashboard",
+            dash_rows,
+            ["port", "pid", "parent_alive", "orphan", "state_dir"],
+        ),
+        toon_table(
+            "watcher",
+            watch_rows,
+            ["pid", "parent_alive", "orphan", "target", "state_dir"],
+        ),
+        toon_help(
+            [f"observer-kit stop --sweep {state_dir}"]
+            if orphans
+            else [
+                f"observer-kit axi --state-dir {state_dir}",
+                f"observer-kit dashboard {state_dir}",
+            ]
+        ),
+    )
+    return 0
+
+
+def _axi_help() -> int:
+    from observer_kit import detect_install_skew, version_info
+
+    ver = version_info()
+    skew = detect_install_skew()
+    blocks = [
+        toon_kv("surface", "observer-axi"),
+        toon_kv("axi_schema", AXI_SCHEMA),
+        toon_kv("version", ver["version"]),
+        toon_kv("git_sha", ver["git_sha"]),
+        toon_kv("desc", "Agent eXperience Interface for Observer Kit"),
+        toon_kv("install_skew", bool(skew.get("install_skew"))),
+        toon_help(axi_help_catalog()),
+    ]
+    if skew.get("install_skew"):
+        blocks.insert(-1, toon_kv("upgrade", skew.get("upgrade") or ""))
+        blocks.insert(-1, toon_kv("skew_reason", skew.get("reason") or ""))
+    emit(*blocks)
+    return 0
+
+

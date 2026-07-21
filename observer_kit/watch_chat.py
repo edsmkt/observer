@@ -39,17 +39,11 @@ import json
 import time
 import argparse
 
+from observer_kit._util import pid_alive as _pid_alive, timestamp as _timestamp
+
 
 WATCH_PREFIX = '.observer-watcher-'
 REGISTRY_LOCK = '.observer-watchers.registry.lock'
-
-
-def _timestamp():
-    """UTC RFC 3339 with nanoseconds — matches runguard ordering/chat watermarks."""
-    ns = time.time_ns()
-    secs, nsec = divmod(ns, 1_000_000_000)
-    base = time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(secs))
-    return f'{base}.{nsec:09d}Z'
 
 
 def _load(path):
@@ -77,14 +71,6 @@ def _sig(m):
 def _matches(m, run_id, all_runs=False):
     wakes = m.get('author') == 'user' or m.get('kind') == 'control'
     return wakes and (all_runs or m.get('run') == run_id)
-
-
-def _pid_alive(pid):
-    try:
-        os.kill(int(pid), 0)
-        return True
-    except (OSError, TypeError, ValueError):
-        return False
 
 
 def _load_one(path):
