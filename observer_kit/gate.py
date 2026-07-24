@@ -3,6 +3,13 @@
 Triggers on side-effect scripts (skill real trigger B) that are not already
 under Observer Kit, when an agent writes, loads, or shells them.
 
+This is a **compliance nudge**, not a security boundary. Detection is
+regex-based: it can false-positive on innocent helpers (e.g. dataclass
+``.create(``, ``dict.update(``) and can be bypassed by renamed wrappers or
+non-Python side effects. Prefer ``start_observed_run`` + ``observer-kit run``;
+use ``# observer: ignore`` only for intentional opt-outs. See README
+"Side-effect compliance gate".
+
 Exit codes (CLI):
   0 — allow (not side-effect, or already under Observer)
   1 — deny (side-effect without Observer harness / run wrapper)

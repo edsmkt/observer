@@ -1,56 +1,32 @@
-<h1 align="center">Observer</h1>
+# Observer
 
-<p align="center"><strong>Visible execution and orchestration for agent-run data work.</strong></p>
+**Run locks, JSONL ledgers, a localhost dashboard, and an agent CLI** so agent-run
+data work stays reviewable — sample first, fix in place, approve the full run.
 
-<p align="center"><strong>Observer Kit</strong> supervises each run. <strong>Observer Flow</strong> coordinates dependent steps.<br />
-Agents orient through an <strong>AXI</strong> CLI; humans review on the local dashboard.</p>
+An agent can pull records, enrich them, and write results back while you wait in
+chat. Without structure you cannot see what landed, catch a bad row early, or
+tell the agent what to change while the job is still running. Observer gives you
+that structure.
 
-<p align="center">
-  <img alt="Python 3.9+" src="https://img.shields.io/badge/python-3.9%2B-3776AB?style=flat-square" />
-  <img alt="Platform macOS and Linux" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-4D8D6E?style=flat-square" />
-  <img alt="Local first" src="https://img.shields.io/badge/local--first-yes-2F855A?style=flat-square" />
-  <img alt="AXI" src="https://img.shields.io/badge/AXI-agent%20CLI-0D9488?style=flat-square" />
-  <img alt="Agent Skills" src="https://img.shields.io/badge/Agent%20Skills-compatible-5B6EE1?style=flat-square" />
-  <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-5D6570?style=flat-square" />
-</p>
+| Piece | What it is |
+| --- | --- |
+| **Run locks** | Source-based locks and durable checkpoints so retries resume the same lane |
+| **JSONL ledger** | Append-only events for live rows, progress, and audit |
+| **Dashboard** | Localhost table, flow graph, chat, pause / stop / approve |
+| **AXI** | `observer-kit axi` — dense TOON status for agents (live runs, orphans, `install_skew`, next commands) |
+| **Compliance gate** | PreToolUse nudge that blocks side-effect scripts not under Observer (not a security boundary — [details](#side-effect-compliance-gate)) |
+| **Observer Flow** | Dependency graph for multi-step pipelines under the same harness |
+
+**Observer Kit** supervises each run. **Observer Flow** coordinates dependent
+steps. Agents orient with AXI; humans review on the dashboard. Stdlib-only
+runtime (Python 3.9+, macOS / Linux, MIT).
 
 <p align="center">
   <img alt="Observer Flow dependency graph" src="assets/dashboard-flow.png" width="960" />
 </p>
 
-Data transformation used to happen in familiar places: a database query, a
-spreadsheet, a table you could watch change row by row. Now an agent can pull
-records, enrich them, and write the results back while you wait in a chat.
-
-That is fast, but it is hard to review. You cannot see what landed, spot a bad
-row early, or tell the agent exactly what needs to change while the workflow is
-still running.
-
-This repository gives the agent two connected layers. **Observer Kit** turns an
-agent-run data transformation into a reviewable working session. **Observer
-Flow** lets the agent compose dependent transformations as a visible graph while
-Observer Kit continues to supervise the complete run.
-
-The local dashboard lets you see rows arrive, inspect what changed, follow each
-row through a multi-step flow, message the agent about a specific record, and
-pause the run when something needs attention.
-
-Use it for imports, database exports, enrichment, backfills, CRM updates,
-spreadsheet pushes, and any other job that changes or moves many records.
-
-It gives the collaboration loop a few simple pieces:
-
-- **A live table**: see the actual source rows and outcomes as work lands.
-- **A live flow**: inspect nodes, dependencies, batches, branches, and the path
-  taken by an individual row.
-- **A review conversation**: point the agent at a row or message it about the
-  whole run.
-- **Run controls**: pause at a checkpoint, stop after the current record, and
-  approve a full run only after reviewing a sample.
-- **An agent playbook**: skill judgment for sample, locks, and full-run approval.
-- **An AXI CLI**: dense TOON status (`observer-kit axi`) so agents know live runs,
-  orphans, and next steps without scraping human help text.
-- **A human dashboard**: localhost review of rows, flow, chat, and controls.
+Use it for imports, exports, enrichment, backfills, CRM updates, spreadsheet
+pushes, and any job that changes or moves many records.
 
 ## How It Works
 
@@ -437,15 +413,21 @@ Use the Observer Kit skill for sample, locks, and full-run approval.
 Use observer-kit dashboard for the human; do not scrape the HTML.
 ```
 
-### Side-effect compliance hooks
+### Side-effect compliance gate
 
-This repo ships Claude Code hooks for Observer compliance:
+Observer ships a **compliance nudge** so agents do not quietly write or run
+side-effect scripts outside the harness. It is **not a security boundary** and
+must not be treated as one.
+
+This repo wires Claude Code hooks:
 
 1. **UserPromptSubmit** — if you say e.g. “no need to use observer kit”, injects
    a note so the agent stamps `# observer: ignore` on side-effect files.
-2. **PreToolUse** — blocks Write / Read / Bash on **side-effect** scripts
+2. **PreToolUse** — denies Write / Read / Bash on **side-effect** scripts
    (CRM/API writes, DB mutations, webhooks, metered loops, …) that are **not**
    under Observer Kit, unless the file has `# observer: ignore`.
+
+CLI and hooks:
 
 - Gate engine: `observer-kit gate path.py` or `observer-kit gate --command '…'`
 - Hooks: [`.claude/hooks/observer-gate.sh`](.claude/hooks/observer-gate.sh),
@@ -455,6 +437,41 @@ This repo ships Claude Code hooks for Observer compliance:
 Prefer wiring `start_observed_run` and launching with
 `observer-kit run --state-dir .observer -- …`. Use `# observer: ignore` only when
 you intentionally opt out.
+
+#### What it is (and is not)
+
+| | |
+| --- | --- |
+| **Is** | A regex heuristic that steers agents toward the harness during Write / Bash |
+| **Is not** | Access control, sandboxing, or a guarantee that all side effects are observed |
+| **Allows** | Scripts that import `observer_kit` / call `start_observed_run`, or run via `observer-kit run`, or carry `# observer: ignore` |
+| **Skips** | Tests, `setup.py`, anything under `observer_kit/`, non-`.py` paths |
+
+#### Known false positives
+
+The `write_sdk` / `orm_write` patterns match method names such as `.create(`,
+`.update(`, `.insert(`, `.save(`. Innocent code can trip them:
+
+- Dataclass or Pydantic factory helpers named `create`
+- `dict.update(` / mapping helpers
+- Local builders that only mutate in-memory objects
+
+When that happens: wire the real side-effect path under Observer, or stamp
+`# observer: ignore` with a short reason if the file truly has no external write.
+
+#### Known bypasses (why it is not a security boundary)
+
+Detection is intentionally shallow. It can be dodged by:
+
+- Renaming helpers so call sites no longer match the regex
+- Side effects in non-Python (shell, SQL clients, other languages)
+- Dynamic import / `getattr` indirection that hides write APIs
+- Running outside Claude Code hooks (or with hooks disabled)
+- Opting out with `# observer: ignore` (honored by design)
+
+Treat the gate as a **reminder and early friction**, not enforcement. Trust
+comes from the harness itself: sample → dashboard review → explicit full-run
+approval, plus locks, ledger, and AXI for live status.
 
 Run the full acceptance suite from this repository with:
 
