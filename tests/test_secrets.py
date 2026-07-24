@@ -2,6 +2,9 @@
 """Tests for observer-kit run --secrets (op:// pointer possession boundary)."""
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import os
 import stat
 import subprocess
@@ -18,7 +21,13 @@ ENV["PYTHONPATH"] = os.pathsep.join([str(REPO), ENV.get("PYTHONPATH", "")])
 ENV["OBSERVER_NO_LINT"] = "1"
 ENV["OBSERVER_ALLOW_UNAPPROVED_FULL_RUN"] = "1"
 
-from observer_kit.cli import load_secret_pointers, wrap_command_with_secrets  # noqa: E402
+from observer_kit.cli import (  # noqa: E402
+    command_implies_dry_run,
+    ensure_secrets_approval,
+    load_secret_pointers,
+    record_secrets_injection,
+    wrap_command_with_secrets,
+)
 
 
 def ok(name: str, condition: bool, detail: str = "") -> None:
@@ -33,12 +42,18 @@ def ok(name: str, condition: bool, detail: str = "") -> None:
         failed += 1
 
 
-def expect_exit(fn, *args, **kwargs) -> str:
+def expect_exit(fn, *args, **kwargs) -> tuple[int, str]:
+    err = io.StringIO()
     try:
-        fn(*args, **kwargs)
+        with contextlib.redirect_stderr(err):
+            fn(*args, **kwargs)
     except SystemExit as exc:
-        return str(exc)
-    return ""
+        code = exc.code if isinstance(exc.code, int) else 1
+        msg = err.getvalue()
+        if not isinstance(exc.code, int) and exc.code:
+            msg = (msg + " " + str(exc.code)).strip()
+        return code, msg
+    return 0, err.getvalue()
 
 
 print("Testing observer-kit run --secrets\n")
@@ -72,42 +87,82 @@ with tempfile.TemporaryDirectory(prefix="observer-secrets-") as tmp:
 
     plain = root / "plain.env"
     plain.write_text("HUBSPOT_TOKEN=sk-live-not-a-pointer\n", encoding="utf-8")
-    msg = expect_exit(load_secret_pointers, plain)
+    code, msg = expect_exit(load_secret_pointers, plain)
     ok(
-        "load_secret_pointers refuses plain secret values",
-        "op://" in msg and "committable" in msg,
-        msg,
+        "load_secret_pointers refuses plain secret values with exit 2",
+        code == 2 and "op://" in msg and "committable" in msg,
+        f"code={code} msg={msg}",
     )
 
     empty = root / "empty.env"
     empty.write_text("# only comments\n\n", encoding="utf-8")
-    msg = expect_exit(load_secret_pointers, empty)
-    ok("load_secret_pointers refuses empty pointer files", "no KEY=op://" in msg, msg)
+    code, msg = expect_exit(load_secret_pointers, empty)
+    ok(
+        "load_secret_pointers refuses empty pointer files with exit 2",
+        code == 2 and "no KEY=op://" in msg,
+        f"code={code} msg={msg}",
+    )
 
     missing = root / "missing.env"
-    msg = expect_exit(load_secret_pointers, missing)
-    ok("load_secret_pointers fails on missing file", "not found" in msg, msg)
+    code, msg = expect_exit(load_secret_pointers, missing)
+    ok(
+        "load_secret_pointers fails on missing file with exit 2",
+        code == 2 and "not found" in msg,
+        f"code={code} msg={msg}",
+    )
 
     bad_line = root / "bad.env"
     bad_line.write_text("not-an-assignment\n", encoding="utf-8")
-    msg = expect_exit(load_secret_pointers, bad_line)
-    ok("load_secret_pointers rejects lines without KEY=", "expected KEY=" in msg, msg)
+    code, msg = expect_exit(load_secret_pointers, bad_line)
+    ok(
+        "load_secret_pointers rejects lines without KEY= with exit 2",
+        code == 2 and "expected KEY=" in msg,
+        f"code={code} msg={msg}",
+    )
+
+    ok(
+        "command_implies_dry_run detects --dry-run",
+        command_implies_dry_run(["python3", "w.py", "--dry-run", "--limit", "10"])
+        and not command_implies_dry_run(["python3", "w.py", "--full-run"]),
+    )
+
+    audit_state = root / "audit-state"
+    audit_state.mkdir()
+    record_secrets_injection(
+        audit_state,
+        ["HUBSPOT_TOKEN"],
+        good,
+        dry_run=True,
+        run_id="runguard:demo-lane",
+    )
+    audit_lines = (audit_state / "secrets_audit.jsonl").read_text(encoding="utf-8").splitlines()
+    lane_lines = (
+        audit_state / "runs" / "demo-lane" / "events.jsonl"
+    ).read_text(encoding="utf-8").splitlines()
+    audit_rec = json.loads(audit_lines[0])
+    lane_rec = json.loads(lane_lines[0])
+    ok(
+        "record_secrets_injection writes names-only audit + lane ledger events",
+        audit_rec.get("event") == "secrets_injected"
+        and audit_rec.get("keys") == ["HUBSPOT_TOKEN"]
+        and "sk-" not in audit_lines[0]
+        and "op://" not in json.dumps(audit_rec.get("keys"))
+        and lane_rec.get("run") == "runguard:demo-lane"
+        and lane_rec.get("keys") == ["HUBSPOT_TOKEN"],
+        audit_lines[0] + " | " + lane_lines[0],
+    )
 
     # wrap without op on PATH
-    path_no_op = os.pathsep.join(
-        p for p in ENV.get("PATH", os.defpath).split(os.pathsep) if p and "op" not in p
-    )
-    # Safer: isolate PATH to empty dir so which("op") fails
     empty_bin = root / "empty-bin"
     empty_bin.mkdir()
     saved_path = os.environ.get("PATH")
     os.environ["PATH"] = str(empty_bin)
     try:
-        msg = expect_exit(wrap_command_with_secrets, ["python3", "w.py"], good)
+        code, msg = expect_exit(wrap_command_with_secrets, ["python3", "w.py"], good)
         ok(
-            "wrap_command_with_secrets fails closed when op missing",
-            "op" in msg and "PATH" in msg,
-            msg,
+            "wrap_command_with_secrets fails closed when op missing with exit 2",
+            code == 2 and "op" in msg and "PATH" in msg,
+            f"code={code} msg={msg}",
         )
     finally:
         if saved_path is None:
@@ -284,11 +339,121 @@ with tempfile.TemporaryDirectory(prefix="observer-secrets-") as tmp:
         )
         out3 = proc3.stdout + proc3.stderr
         ok(
-            "run --secrets with plain values exits before launching child",
-            proc3.returncode != 0
+            "run --secrets with plain values exits 2 before launching child",
+            proc3.returncode == 2
             and "op://" in out3
             and "should-not-run" not in out3,
-            out3[-500:],
+            f"rc={proc3.returncode} {out3[-500:]}",
+        )
+
+        audit = state / "secrets_audit.jsonl"
+        ok(
+            "run --secrets writes durable secrets_audit.jsonl (names only)",
+            audit.is_file()
+            and "secrets_injected" in audit.read_text(encoding="utf-8")
+            and "HUBSPOT_TOKEN" in audit.read_text(encoding="utf-8")
+            and "test-token-from-op" not in audit.read_text(encoding="utf-8"),
+            audit.read_text(encoding="utf-8") if audit.is_file() else "missing",
+        )
+
+        # Full-run without approval must not materialize credentials (exit 4).
+        strict_env = run_env.copy()
+        strict_env.pop("OBSERVER_ALLOW_UNAPPROVED_FULL_RUN", None)
+        strict_env["OBSERVER_REQUIRE_FULL_RUN_APPROVAL"] = "1"
+        proc4 = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                "-m",
+                "observer_kit",
+                "run",
+                "--state-dir",
+                str(state),
+                "--watch",
+                "none",
+                "--exit-after-run",
+                "--secrets",
+                str(secrets),
+                "--",
+                sys.executable,
+                "-B",
+                "-c",
+                "import os; print('LEAK=' + (os.environ.get('HUBSPOT_TOKEN') or ''))",
+            ],
+            cwd=project,
+            env=strict_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        out4 = proc4.stdout + proc4.stderr
+        ok(
+            "full-run --secrets without approval exits 4 before op injects credentials",
+            proc4.returncode == 4
+            and "approve_full_run" in out4
+            and "LEAK=" not in out4
+            and "test-token-from-op" not in out4,
+            f"rc={proc4.returncode} {out4[-600:]}",
+        )
+
+        # Dry-run still gets secrets under strict approval policy.
+        proc5 = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                "-m",
+                "observer_kit",
+                "run",
+                "--state-dir",
+                str(state),
+                "--watch",
+                "none",
+                "--exit-after-run",
+                "--secrets",
+                str(secrets),
+                "--",
+                sys.executable,
+                "-B",
+                "-c",
+                "import os; print('TOKEN=' + (os.environ.get('HUBSPOT_TOKEN') or ''))",
+                "--dry-run",
+            ],
+            cwd=project,
+            env=strict_env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        out5 = proc5.stdout + proc5.stderr
+        ok(
+            "dry-run --secrets still injects credentials under approval policy",
+            proc5.returncode == 0 and "TOKEN=test-token-from-op" in out5,
+            f"rc={proc5.returncode} {out5[-600:]}",
+        )
+
+        # Unit: ensure_secrets_approval with a posted control.
+        from observer_kit.runguard import post_control
+
+        os.environ["RUNGUARD_STATE_DIR"] = str(state)
+        try:
+            post_control("runguard:approved-lane", "approve_full_run", note="ok")
+        finally:
+            pass
+        try:
+            ensure_secrets_approval(
+                state,
+                ["python3", "w.py", "--full-run"],
+                run_id="runguard:approved-lane",
+            )
+            approved_ok = True
+            approved_msg = ""
+        except SystemExit as exc:
+            approved_ok = False
+            approved_msg = str(exc)
+        ok(
+            "ensure_secrets_approval allows full-run when approve_full_run is pending",
+            approved_ok,
+            approved_msg,
         )
     finally:
         if saved_path is None:

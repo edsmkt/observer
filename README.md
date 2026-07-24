@@ -29,19 +29,29 @@ whatever the workflow logs — nothing is hardcoded.
 
 Stdlib-only runtime, zero dependencies (Python 3.9+, macOS / Linux, MIT).
 
-## Why not just chain APIs?
+## The problem with glued-together automations
 
-Glued-together automations are brittle. One empty response, rate limit, or
-changed field and the chain falls apart — fine for a personal demo, bad when a
-client CRM is on the other end.
+Chains of glued APIs are brittle. One edge case — an empty response, a rate
+limit, a changed field — and the chain falls apart. That is tolerable when you
+test for yourself. It fails when a client's CRM is on the other end.
 
-Observer does not promise pipelines never break. It promises **contained,
-visible, recoverable failure**: errors land on specific rows in minutes (not at
-month-end), the ledger shows what a bad run touched, checkpoints make re-runs
-safe, and non-deterministic steps (LLM calls, flaky enrichment) go through the
-sample → approve loop before full spend. Multi-step graphs declare inputs,
-outputs, and conditions so `validate-flow` and a team can reason about every
-step.
+Observer does not promise your pipeline will never break. It promises
+contained, visible, recoverable failure:
+
+- failures appear on the Attention tab as errors on specific rows, within
+  minutes rather than at month-end reconciliation
+- the ledger shows exactly which rows a bad run touched
+- the run pauses at a checkpoint instead of corrupting data — locks and
+  checkpoints make the re-run safe
+- each Observer Flow node declares its inputs, outputs, and conditions, and
+  `validate-flow` checks the graph, so a team can reason about every step
+- where a step cannot be deterministic (an LLM call, a flaky enrichment), the
+  sample and approval loop verifies its behaviour on real rows before the full
+  spend
+
+A demo tolerates edge cases you have not met yet. A system a team operates
+needs known input and output at every step — and when something breaks, a fast
+answer to what broke, where, and how to resume.
 
 ## Quick start
 
@@ -78,6 +88,8 @@ the dashboard.
 One script or a multi-node flow both go through the Kit harness. Agents use
 `observer-kit axi` for status; you use the dashboard for rows, graph, chat, and
 controls. After a fix, the same run continues and existing rows update in place.
+As Flow finds repeated node patterns, it logs evidence into a project
+`flow-cookbook/` and asks before promoting them into reusable nodes or subflows.
 
 ```bash
 # Multi-step flow under the same harness
@@ -214,7 +226,8 @@ observer-kit dashboard .observer --parent-pid $$          # exit when this shell
 observer-kit dashboard .observer --idle-timeout 1800      # exit after 30m idle
 observer-kit run --state-dir .observer -- python3 workflow.py --dry-run --limit 10
 observer-kit run --state-dir .observer --secrets .observer/secrets.env -- \
-  python3 workflow.py --dry-run --limit 10   # KEY=op:// only; wraps with op run
+  python3 workflow.py --dry-run --limit 10   # KEY=op:// only; op run; samples ok
+# full-run with --secrets needs pending approve_full_run first (else exit 4)
 observer-kit watch .observer --run runguard:my-run --follow
 observer-kit reply .observer --run runguard:my-run --anchor run --text "I fixed this."
 observer-kit ps .observer                                 # list dashboards/watchers
@@ -272,15 +285,15 @@ Use observer-kit dashboard for the human; do not scrape the HTML.
 
 ### Side-effect compliance gate
 
-A **compliance nudge** so agents do not quietly write or run side-effect scripts
-outside the harness. **Not a security boundary.**
+A compliance nudge so agents do not quietly write or run side-effect scripts
+outside the harness. It is not a security boundary.
 
 Claude Code hooks in this repo:
 
-1. **UserPromptSubmit** — phrases like “no need to use observer kit” inject a
-   note so the agent stamps `# observer: ignore` on side-effect files.
-2. **PreToolUse** — denies Write / Read / Bash on side-effect scripts that are
-   not under Observer, unless the file has `# observer: ignore`.
+1. UserPromptSubmit — phrases like “no need to use observer kit” inject a note
+   so the agent stamps `# observer: ignore` on side-effect files.
+2. PreToolUse — denies Write / Read / Bash on side-effect scripts that are not
+   under Observer, unless the file has `# observer: ignore`.
 
 CLI: `observer-kit gate path.py` or `observer-kit gate --command '…'`.  
 Hooks: [`.claude/hooks/observer-gate.sh`](.claude/hooks/observer-gate.sh),
@@ -292,20 +305,20 @@ for intentional opt-outs.
 
 | | |
 | --- | --- |
-| **Is** | A regex heuristic that steers agents toward the harness during Write / Bash |
-| **Is not** | Access control, sandboxing, or a guarantee that all side effects are observed |
-| **Allows** | `observer_kit` / `start_observed_run`, `observer-kit run`, or `# observer: ignore` |
-| **Skips** | Tests, `setup.py`, `observer_kit/`, non-`.py` paths |
+| Is | A regex heuristic that steers agents toward the harness during Write / Bash |
+| Is not | Access control, sandboxing, or a guarantee that all side effects are observed |
+| Allows | `observer_kit` / `start_observed_run`, `observer-kit run`, or `# observer: ignore` |
+| Skips | Tests, `setup.py`, `observer_kit/`, non-`.py` paths |
 
-**False positives:** `write_sdk` / `orm_write` match `.create(`, `.update(`,
+False positives: `write_sdk` / `orm_write` match `.create(`, `.update(`,
 `.insert(`, `.save(` — including dataclass factories, `dict.update(`, and
 in-memory builders. Wire real side effects under Observer, or stamp
 `# observer: ignore` with a short reason when there is no external write.
 
-**Bypasses (why not security):** renamed helpers, non-Python side effects,
-dynamic import / `getattr`, hooks disabled, or `# observer: ignore` (by design).
-Treat the gate as early friction. Trust is the harness: sample → review →
-full-run approval, plus locks, ledger, and AXI.
+Bypasses (why not security): renamed helpers, non-Python side effects, dynamic
+import / `getattr`, hooks disabled, or `# observer: ignore` (by design). Treat
+the gate as early friction. Trust is the harness: sample → review → full-run
+approval, plus locks, ledger, and AXI.
 
 ```bash
 python3 -m observer_kit test

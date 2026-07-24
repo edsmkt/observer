@@ -65,6 +65,15 @@ def _runtime_module_path(module: str) -> Path:
 # Secrets via 1Password pointers: harness owns resolution; scripts never hold values.
 # Not a sandbox — only a possession boundary when --secrets is used.
 _OP_POINTER = re.compile(r"^op://\S+$")
+# Match ApprovalRequired.exit_code in runguard — full-run without approval.
+_SECRETS_APPROVAL_EXIT = 4
+_SECRETS_USAGE_EXIT = 2
+
+
+def _secrets_exit(message: str, code: int = _SECRETS_USAGE_EXIT) -> None:
+    """Fail closed for secrets errors (stderr + explicit exit code)."""
+    print(message, file=sys.stderr)
+    raise SystemExit(code)
 
 
 def load_secret_pointers(path: Path) -> list[str]:
@@ -76,18 +85,18 @@ def load_secret_pointers(path: Path) -> list[str]:
     """
     path = path.expanduser()
     if not path.is_file():
-        raise SystemExit(f"[observer] secrets: file not found: {path}")
+        _secrets_exit(f"[observer] secrets: file not found: {path}")
     keys: list[str] = []
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
-        raise SystemExit(f"[observer] secrets: cannot read {path}: {exc}") from exc
+        _secrets_exit(f"[observer] secrets: cannot read {path}: {exc}")
     for lineno, raw in enumerate(text.splitlines(), 1):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
         if "=" not in line:
-            raise SystemExit(
+            _secrets_exit(
                 f"[observer] secrets: line {lineno}: expected KEY=op://... "
                 f"(got {raw!r})"
             )
@@ -95,18 +104,16 @@ def load_secret_pointers(path: Path) -> list[str]:
         key = key.strip()
         value = value.strip().strip('"').strip("'")
         if not key:
-            raise SystemExit(
-                f"[observer] secrets: line {lineno}: missing key name"
-            )
+            _secrets_exit(f"[observer] secrets: line {lineno}: missing key name")
         if not _OP_POINTER.match(value):
-            raise SystemExit(
+            _secrets_exit(
                 f"[observer] secrets: line {lineno}: {key} must be an op:// "
                 "pointer only — plain secrets are refused so the file stays "
                 "committable"
             )
         keys.append(key)
     if not keys:
-        raise SystemExit(f"[observer] secrets: no KEY=op:// entries in {path}")
+        _secrets_exit(f"[observer] secrets: no KEY=op:// entries in {path}")
     seen: set[str] = set()
     unique: list[str] = []
     for key in keys:
@@ -115,6 +122,171 @@ def load_secret_pointers(path: Path) -> list[str]:
         seen.add(key)
         unique.append(key)
     return unique
+
+
+def command_implies_dry_run(command: list[str]) -> bool:
+    """True when argv looks like a dry-run / sample (secrets may resolve)."""
+    for tok in command:
+        low = str(tok).strip().lower()
+        if low in {"--dry-run", "-n"}:
+            return True
+        if low.startswith("--dry-run="):
+            val = low.split("=", 1)[1]
+            if val not in {"0", "false", "no", "off"}:
+                return True
+    return False
+
+
+def _secrets_approval_required() -> bool:
+    """Same default as runguard: full-run approval on unless explicitly opted out."""
+    raw = os.environ.get("OBSERVER_ALLOW_UNAPPROVED_FULL_RUN", "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return False
+    raw_req = os.environ.get("OBSERVER_REQUIRE_FULL_RUN_APPROVAL", "").strip().lower()
+    if raw_req in {"0", "false", "no", "off"}:
+        return False
+    return True
+
+
+def list_pending_full_run_approvals(state_dir: Path) -> list[str]:
+    """Run ids with a valid unacked ``approve_full_run`` under *state_dir*."""
+    state_dir = state_dir.expanduser().resolve()
+    prev = os.environ.get("RUNGUARD_STATE_DIR")
+    os.environ["RUNGUARD_STATE_DIR"] = str(state_dir)
+    try:
+        from observer_kit.runguard import pending_full_run_approvals
+
+        candidates: set[str] = set()
+        runs = state_dir / "runs"
+        if runs.is_dir():
+            for lane_dir in runs.iterdir():
+                if lane_dir.is_dir() and not lane_dir.name.startswith("."):
+                    candidates.add(f"runguard:{lane_dir.name}")
+        # Root / legacy controls may tag a run id without a lane folder yet.
+        root_controls = state_dir / "controls.jsonl"
+        if root_controls.is_file():
+            try:
+                for line in root_controls.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if rec.get("kind") != "approve_full_run":
+                        continue
+                    rid = rec.get("run")
+                    if rid:
+                        candidates.add(str(rid))
+            except OSError:
+                pass
+
+        pending: list[str] = []
+        for rid in sorted(candidates):
+            try:
+                if pending_full_run_approvals(rid):
+                    pending.append(rid)
+            except Exception:
+                continue
+        return pending
+    finally:
+        if prev is None:
+            os.environ.pop("RUNGUARD_STATE_DIR", None)
+        else:
+            os.environ["RUNGUARD_STATE_DIR"] = prev
+
+
+def ensure_secrets_approval(
+    state_dir: Path,
+    command: list[str],
+    *,
+    run_id: str | None = None,
+) -> None:
+    """Refuse to resolve secrets for an unapproved full run (exit 4).
+
+    Dry-run samples may still receive credentials. Full runs (no ``--dry-run``)
+    require a pending ``approve_full_run`` unless
+    ``OBSERVER_ALLOW_UNAPPROVED_FULL_RUN=1``.
+    """
+    if command_implies_dry_run(command):
+        return
+    if not _secrets_approval_required():
+        return
+    pending = list_pending_full_run_approvals(state_dir)
+    if run_id:
+        if run_id in pending or any(
+            p == run_id or p.endswith(f":{run_id}") for p in pending
+        ):
+            return
+        # Precise check for the requested lane even if scan missed it.
+        prev = os.environ.get("RUNGUARD_STATE_DIR")
+        os.environ["RUNGUARD_STATE_DIR"] = str(state_dir.expanduser().resolve())
+        try:
+            from observer_kit.runguard import pending_full_run_approvals
+
+            if pending_full_run_approvals(run_id):
+                return
+        finally:
+            if prev is None:
+                os.environ.pop("RUNGUARD_STATE_DIR", None)
+            else:
+                os.environ["RUNGUARD_STATE_DIR"] = prev
+        _secrets_exit(
+            f"[observer] secrets: full-run refused — no approve_full_run for "
+            f"{run_id}. Review a dry-run sample, approve on the dashboard, then "
+            f"retry (exit {_SECRETS_APPROVAL_EXIT}).",
+            _SECRETS_APPROVAL_EXIT,
+        )
+    if pending:
+        return
+    _secrets_exit(
+        "[observer] secrets: full-run refused — no pending approve_full_run in "
+        f"{state_dir}. Run a --dry-run sample first (secrets allowed for samples), "
+        "approve on the dashboard, then retry the full run "
+        f"(exit {_SECRETS_APPROVAL_EXIT}). "
+        "Or pass --run-id runguard:LANE after approval. "
+        "Opt out: OBSERVER_ALLOW_UNAPPROVED_FULL_RUN=1.",
+        _SECRETS_APPROVAL_EXIT,
+    )
+
+
+def _append_jsonl_record(path: Path, record: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(record, ensure_ascii=False, sort_keys=True, default=str)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(line + "\n")
+
+
+def record_secrets_injection(
+    state_dir: Path,
+    keys: list[str],
+    secrets_path: Path,
+    *,
+    dry_run: bool,
+    run_id: str | None = None,
+) -> None:
+    """Durable names-only audit: state-dir secrets_audit.jsonl + optional lane ledger."""
+    from observer_kit._util import lane_from_run_id, timestamp as _ts
+
+    rec = {
+        "event": "secrets_injected",
+        "ts": _ts(),
+        "keys": list(keys),
+        "source": str(secrets_path),
+        "dry_run": bool(dry_run),
+        "pid": os.getpid(),
+    }
+    if run_id:
+        rec["run"] = str(run_id)
+    state_dir = state_dir.expanduser().resolve()
+    _append_jsonl_record(state_dir / "secrets_audit.jsonl", rec)
+    if run_id:
+        lane = lane_from_run_id(run_id)
+        if lane:
+            _append_jsonl_record(
+                state_dir / "runs" / lane / "events.jsonl", rec
+            )
 
 
 def wrap_command_with_secrets(
@@ -128,7 +300,7 @@ def wrap_command_with_secrets(
     keys = load_secret_pointers(secrets_path)
     op_bin = shutil.which("op")
     if not op_bin:
-        raise SystemExit(
+        _secrets_exit(
             "[observer] secrets: 1Password CLI 'op' not on PATH. "
             "Install it, or omit --secrets."
         )
@@ -885,12 +1057,34 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
 
     # Credential possession boundary (opt-in): resolve op:// pointers only for
-    # this child. Dry-run samples still get keys; approval remains the spend gate.
+    # this child. Dry-run samples still get keys. Full runs require pending
+    # approve_full_run before op is invoked (no credentials on exit 4).
     secrets_arg = getattr(args, "secrets", None)
+    secrets_meta: dict | None = None
     if secrets_arg:
         secrets_path = Path(secrets_arg).expanduser().resolve()
-        command, secret_keys = wrap_command_with_secrets(command, secrets_path)
+        child_argv = list(command)
+        dry_sample = command_implies_dry_run(child_argv)
+        ensure_secrets_approval(
+            state_dir,
+            child_argv,
+            run_id=getattr(args, "run_id", None) or None,
+        )
+        command, secret_keys = wrap_command_with_secrets(child_argv, secrets_path)
         env["OBSERVER_SECRETS"] = ",".join(secret_keys)
+        record_secrets_injection(
+            state_dir,
+            secret_keys,
+            secrets_path,
+            dry_run=dry_sample,
+            run_id=None,
+        )
+        secrets_meta = {
+            "keys": secret_keys,
+            "path": secrets_path,
+            "dry_run": dry_sample,
+            "lane_recorded": False,
+        }
         print(
             f"[observer] secrets: injecting {', '.join(secret_keys)} via op run "
             f"(source={secrets_path})",
@@ -918,6 +1112,15 @@ def cmd_run(args: argparse.Namespace) -> int:
                 run_id = line.strip().split(maxsplit=1)[1]
                 run_id_holder["run_id"] = run_id
                 ensure_watcher(run_id)
+                if secrets_meta and not secrets_meta.get("lane_recorded"):
+                    record_secrets_injection(
+                        state_dir,
+                        secrets_meta["keys"],
+                        secrets_meta["path"],
+                        dry_run=bool(secrets_meta.get("dry_run")),
+                        run_id=run_id,
+                    )
+                    secrets_meta["lane_recorded"] = True
             sys.stderr.write(line)
             sys.stderr.flush()
 
@@ -1608,7 +1811,16 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "env file of KEY=op:// pointers only; wrap the child with "
             "`op run --env-file` so credentials exist only inside the harnessed "
-            "process (opt-in possession boundary — not a sandbox)"
+            "process (opt-in possession boundary — not a sandbox). Full runs "
+            "without --dry-run require pending approve_full_run before op runs"
+        ),
+    )
+    run.add_argument(
+        "--run-id",
+        metavar="ID",
+        help=(
+            "optional runguard:LANE for secrets full-run approval preflight "
+            "(defaults to any pending approve_full_run in the state dir)"
         ),
     )
     run.add_argument("command", nargs=argparse.REMAINDER,
