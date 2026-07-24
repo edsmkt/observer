@@ -3,7 +3,7 @@
 When auditing a list of checks:
 
 1. **One shared prompt per check** (scope, intent, deliberate decisions, non-goals).
-2. **Three seats, concurrent:** [buggie](../.claude/skills/buggie/SKILL.md) · [no-mistakes](../.claude/skills/no-mistakes/SKILL.md) · [ponytail ultra](../.claude/skills/ponytail/SKILL.md).
+2. **Three seats, concurrent:** buggie · no-mistakes · ponytail ultra. These are operator-local agent skills and may not be present in the published tree; see `auditor-loop/AUDIT_PANEL.md` for the full local protocol.
 3. **Synthesize → fix** agreed majors (verify before/after).
 4. **Auditor loop:** update `auditor-loop/PROMPT.md` (or residual brief), run `./auditor-loop/run.sh`, read `LATEST.md`, fix again if needed.
 5. **Repeat triad + auditor-loop** on the **same** check until no major issues.
